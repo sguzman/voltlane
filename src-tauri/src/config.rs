@@ -1,4 +1,7 @@
-use std::{fs, path::PathBuf};
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -167,13 +170,13 @@ impl Default for ExportConfig {
 
 impl AppConfig {
     pub fn load() -> Result<Self> {
-        let config_path = PathBuf::from("voltlane.config.toml");
-        let content = fs::read_to_string(&config_path).with_context(|| {
-            format!(
-                "failed to read config file {}; copy from voltlane.config.toml",
-                config_path.display()
-            )
+        let config_path = discover_config_path().with_context(|| {
+            "failed to locate voltlane.config.toml; looked in cwd and parent directory"
+                .to_string()
         })?;
+
+        let content = fs::read_to_string(&config_path)
+            .with_context(|| format!("failed to read config file {}", config_path.display()))?;
 
         let config: AppConfig = toml::from_str(&content).with_context(|| {
             format!("failed to parse config TOML from {}", config_path.display())
@@ -181,4 +184,24 @@ impl AppConfig {
 
         Ok(config)
     }
+}
+
+fn discover_config_path() -> Result<PathBuf> {
+    if let Some(path) = env::var_os("VOLTLANE_CONFIG_PATH") {
+        let path = PathBuf::from(path);
+        if path.is_file() {
+            return Ok(path);
+        }
+    }
+
+    let cwd = env::current_dir().context("failed to resolve current directory")?;
+    let candidates = [
+        cwd.join("voltlane.config.toml"),
+        cwd.join("../voltlane.config.toml"),
+    ];
+
+    candidates
+        .into_iter()
+        .find(|path| Path::new(path).is_file())
+        .ok_or_else(|| anyhow::anyhow!("voltlane.config.toml not found"))
 }
