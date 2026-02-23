@@ -66,6 +66,12 @@ pnpm --dir ui run build
 pnpm run tauri:dev
 ```
 
+### Wayland note (Linux)
+
+Voltlane now auto-applies `WEBKIT_DISABLE_DMABUF_RENDERER=1` at startup when
+`WAYLAND_DISPLAY` is present to avoid WebKitGTK protocol errors on some
+Wayland compositor/driver combinations.
+
 ## Logging
 
 - Core tracing is initialized at runtime with session UUID and JSON file logs.
