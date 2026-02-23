@@ -12,8 +12,8 @@ use crate::{
     },
     export,
     model::{
-        AudioClip, Clip, ClipPayload, DEFAULT_SAMPLE_RATE, EffectSpec, MidiNote, PatternClip,
-        Project, Track, TrackKind, TrackerRow,
+        AudioClip, ChipMacroLane, Clip, ClipPayload, DEFAULT_SAMPLE_RATE, EffectSpec, MidiNote,
+        PatternClip, Project, Track, TrackKind, TrackerRow,
     },
     persistence,
     time::{seconds_to_ticks, tracker_rows_to_ticks},
@@ -112,6 +112,20 @@ pub enum ExportKind {
     Midi,
     Wav,
     Mp3,
+    StemWav,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RenderMode {
+    Offline,
+    Realtime,
+}
+
+impl Default for RenderMode {
+    fn default() -> Self {
+        Self::Offline
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -466,9 +480,11 @@ impl Engine {
 
         let updated_clip = {
             let clip = self.find_clip_mut(track_id, clip_id)?;
-            let target =
-                clip_note_vec_mut(clip).ok_or(EngineError::UnsupportedClipPayload(clip_id))?;
-            *target = notes;
+            {
+                let target =
+                    clip_note_vec_mut(clip).ok_or(EngineError::UnsupportedClipPayload(clip_id))?;
+                *target = notes;
+            }
             if let Some(pattern) = clip_pattern_mut(clip) {
                 sync_pattern_rows_from_notes(pattern, ppq)?;
             }
@@ -492,10 +508,12 @@ impl Engine {
 
         let updated_clip = {
             let clip = self.find_clip_mut(track_id, clip_id)?;
-            let notes =
-                clip_note_vec_mut(clip).ok_or(EngineError::UnsupportedClipPayload(clip_id))?;
-            notes.push(note);
-            notes.sort_by_key(|candidate| candidate.start_tick);
+            {
+                let notes =
+                    clip_note_vec_mut(clip).ok_or(EngineError::UnsupportedClipPayload(clip_id))?;
+                notes.push(note);
+                notes.sort_by_key(|candidate| candidate.start_tick);
+            }
             if let Some(pattern) = clip_pattern_mut(clip) {
                 sync_pattern_rows_from_notes(pattern, ppq)?;
             }
@@ -517,12 +535,14 @@ impl Engine {
         let ppq = self.project.ppq;
         let updated_clip = {
             let clip = self.find_clip_mut(track_id, clip_id)?;
-            let notes =
-                clip_note_vec_mut(clip).ok_or(EngineError::UnsupportedClipPayload(clip_id))?;
-            if note_index >= notes.len() {
-                return Err(EngineError::InvalidNoteIndex(note_index));
+            {
+                let notes =
+                    clip_note_vec_mut(clip).ok_or(EngineError::UnsupportedClipPayload(clip_id))?;
+                if note_index >= notes.len() {
+                    return Err(EngineError::InvalidNoteIndex(note_index));
+                }
+                notes.remove(note_index);
             }
-            notes.remove(note_index);
             if let Some(pattern) = clip_pattern_mut(clip) {
                 sync_pattern_rows_from_notes(pattern, ppq)?;
             }
@@ -544,13 +564,15 @@ impl Engine {
         let ppq = self.project.ppq;
         let updated_clip = {
             let clip = self.find_clip_mut(track_id, clip_id)?;
-            let notes =
-                clip_note_vec_mut(clip).ok_or(EngineError::UnsupportedClipPayload(clip_id))?;
-            for note in notes {
-                let pitch = i16::from(note.pitch)
-                    .saturating_add(semitones)
-                    .clamp(0, 127) as u8;
-                note.pitch = pitch;
+            {
+                let notes =
+                    clip_note_vec_mut(clip).ok_or(EngineError::UnsupportedClipPayload(clip_id))?;
+                for note in notes {
+                    let pitch = i16::from(note.pitch)
+                        .saturating_add(semitones)
+                        .clamp(0, 127) as u8;
+                    note.pitch = pitch;
+                }
             }
             if let Some(pattern) = clip_pattern_mut(clip) {
                 sync_pattern_rows_from_notes(pattern, ppq)?;
@@ -577,16 +599,18 @@ impl Engine {
 
         let updated_clip = {
             let clip = self.find_clip_mut(track_id, clip_id)?;
-            let notes =
-                clip_note_vec_mut(clip).ok_or(EngineError::UnsupportedClipPayload(clip_id))?;
+            {
+                let notes =
+                    clip_note_vec_mut(clip).ok_or(EngineError::UnsupportedClipPayload(clip_id))?;
 
-            for note in notes.iter_mut() {
-                note.start_tick = round_to_grid(note.start_tick, grid_ticks);
-                note.length_ticks =
-                    round_to_grid(note.length_ticks.max(1), grid_ticks).max(grid_ticks);
-                sanitize_note(note);
+                for note in notes.iter_mut() {
+                    note.start_tick = round_to_grid(note.start_tick, grid_ticks);
+                    note.length_ticks =
+                        round_to_grid(note.length_ticks.max(1), grid_ticks).max(grid_ticks);
+                    sanitize_note(note);
+                }
+                notes.sort_by_key(|candidate| candidate.start_tick);
             }
-            notes.sort_by_key(|candidate| candidate.start_tick);
             if let Some(pattern) = clip_pattern_mut(clip) {
                 sync_pattern_rows_from_notes(pattern, ppq)?;
             }
@@ -625,6 +649,30 @@ impl Engine {
 
         self.project.touch();
         info!("pattern rows replaced");
+        Ok(updated_clip)
+    }
+
+    #[instrument(skip(self, macros), fields(project_id = %self.project.id, track_id = %track_id, clip_id = %clip_id, macros = macros.len()))]
+    pub fn upsert_pattern_macros(
+        &mut self,
+        track_id: Uuid,
+        clip_id: Uuid,
+        mut macros: Vec<ChipMacroLane>,
+    ) -> Result<Clip, EngineError> {
+        let updated_clip = {
+            let clip = self.find_clip_mut(track_id, clip_id)?;
+            let pattern =
+                clip_pattern_mut(clip).ok_or(EngineError::UnsupportedPatternClip(clip_id))?;
+
+            for lane in &mut macros {
+                sanitize_chip_macro_lane(lane);
+            }
+            pattern.macros = macros;
+            clip.clone()
+        };
+
+        self.project.touch();
+        info!("pattern macros replaced");
         Ok(updated_clip)
     }
 
@@ -679,11 +727,17 @@ impl Engine {
         kind: ExportKind,
         output_path: &Path,
         ffmpeg_binary: Option<&Path>,
+        render_mode: RenderMode,
     ) -> Result<(), EngineError> {
         match kind {
             ExportKind::Midi => export::export_midi(&self.project, output_path)?,
-            ExportKind::Wav => export::export_wav(&self.project, output_path)?,
-            ExportKind::Mp3 => export::export_mp3(&self.project, output_path, ffmpeg_binary)?,
+            ExportKind::Wav => export::export_wav(&self.project, output_path, render_mode)?,
+            ExportKind::Mp3 => {
+                export::export_mp3(&self.project, output_path, ffmpeg_binary, render_mode)?
+            }
+            ExportKind::StemWav => {
+                let _paths = export::export_stem_wav(&self.project, output_path, render_mode)?;
+            }
         }
         Ok(())
     }
@@ -742,6 +796,26 @@ fn sanitize_tracker_row(row: &mut TrackerRow) {
     }
 }
 
+fn sanitize_chip_macro_lane(lane: &mut ChipMacroLane) {
+    lane.target = lane.target.trim().to_ascii_lowercase();
+    lane.values.truncate(256);
+    for value in &mut lane.values {
+        *value = (*value).clamp(-127, 127);
+    }
+
+    if lane.target.is_empty() || lane.values.is_empty() {
+        lane.enabled = false;
+    }
+
+    match (lane.loop_start, lane.loop_end) {
+        (Some(start), Some(end)) if start <= end && end < lane.values.len() => {}
+        _ => {
+            lane.loop_start = None;
+            lane.loop_end = None;
+        }
+    }
+}
+
 fn normalize_pattern_clip(pattern: &mut PatternClip, ppq: u16) -> Result<(), EngineError> {
     if pattern.lines_per_beat == 0 {
         return Err(EngineError::InvalidTrackerLinesPerBeat(
@@ -759,6 +833,10 @@ fn normalize_pattern_clip(pattern: &mut PatternClip, ppq: u16) -> Result<(), Eng
         for row in &mut pattern.rows {
             sanitize_tracker_row(row);
         }
+    }
+
+    for lane in &mut pattern.macros {
+        sanitize_chip_macro_lane(lane);
     }
 
     pattern.rows.sort_by_key(|row| row.row);

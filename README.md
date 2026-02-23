@@ -23,11 +23,14 @@ The current implementation now spans Milestone A/B plus core audio-clip workflow
   - MIDI (`.mid`) via `midly`
   - WAV (`.wav`) via deterministic renderer + `hound`
   - MP3 (`.mp3`) via `ffmpeg` sidecar invocation
+  - Stem WAV export (`stem_wav`) with per-track files
 - Extensive structured logging with `tracing` in core and bridge.
 - Tauri commands for all major operations (`project/track/clip/export/parity`).
 - React UI for playlist lanes, track controls, transport, and parity panel.
 - Clip editor panel for MIDI/pattern note editing (add/remove/update notes, quantize, transpose).
 - Tracker grid editor for chip pattern clips (row/effect editing with pattern-note regeneration).
+- Chip macro editor lanes for pattern clips (`arpeggio`, `env`, `duty`) with loop metadata.
+- Export render-mode selection (`offline` or `realtime`) from UI through Rust core.
 - Audio browser panel for asset indexing, waveform preview metadata, and direct import into audio tracks.
 - Deterministic parity harness:
   - golden baseline test
@@ -73,6 +76,12 @@ Audio workflow defaults are configured here:
 - `audio.waveform_cache_dir = "data/waveform-cache"`
 - `audio.analysis_bucket_size = 1024`
 
+Export defaults are configured here:
+
+- `export.ffmpeg_binary = "ffmpeg"`
+- `export.default_render_mode = "offline"`
+- `export.stems_output_dir_name = "stems"`
+
 ### Install dependencies
 
 ```bash
@@ -85,6 +94,7 @@ pnpm install
 cargo check -p voltlane-core
 cargo check -p voltlane-tauri
 cargo test -p voltlane-core
+cargo test -p voltlane-core --test project_corruption_prop
 ```
 
 ### Frontend build
@@ -136,6 +146,12 @@ cargo run -p voltlane-core --bin voltlane-cli -- parity-report --output data/par
 ./scripts/run_parity_harness.sh
 ```
 
+### Performance regression suite
+
+```bash
+./scripts/run_perf_regression.sh
+```
+
 Golden baseline lives at:
 
 - `crates/voltlane-core/tests/fixtures/parity_baseline.json`
@@ -149,7 +165,13 @@ UPDATE_PARITY_BASELINE=1 cargo test -p voltlane-core parity_report_matches_golde
 ## Export Notes
 
 - MP3 export requires `ffmpeg` in `PATH` unless you pass a specific binary path through Tauri command input.
-- WAV and MIDI exports are fully Rust-native in this implementation.
+- WAV, MIDI, and per-track stem WAV exports are Rust-native in this implementation.
+- Stem output files are named like `01_track_name.wav`.
+
+## CI
+
+- Workflow file: `.github/workflows/ci.yml`
+- CI runs `fmt`, `clippy`, workspace tests, UI build, and `cargo audit`.
 
 ## SoundFont Asset
 

@@ -2,8 +2,9 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use voltlane_core::{
+    RenderMode,
     diagnostics::init_tracing,
-    export::{export_midi, export_mp3, export_wav},
+    export::{export_midi, export_mp3, export_stem_wav, export_wav},
     fixtures::demo_project,
     generate_parity_report,
     parity::write_parity_report,
@@ -29,6 +30,9 @@ enum Commands {
 
         #[arg(long, value_enum, default_value = "all")]
         format: DemoFormat,
+
+        #[arg(long, value_enum, default_value = "offline")]
+        render_mode: RenderModeArg,
     },
     ParityReport {
         #[arg(long, default_value = "data/parity/report.json")]
@@ -41,7 +45,23 @@ enum DemoFormat {
     Midi,
     Wav,
     Mp3,
+    StemWav,
     All,
+}
+
+#[derive(Debug, Clone, ValueEnum)]
+enum RenderModeArg {
+    Offline,
+    Realtime,
+}
+
+impl From<RenderModeArg> for RenderMode {
+    fn from(value: RenderModeArg) -> Self {
+        match value {
+            RenderModeArg::Offline => Self::Offline,
+            RenderModeArg::Realtime => Self::Realtime,
+        }
+    }
 }
 
 fn main() -> anyhow::Result<()> {
@@ -49,19 +69,32 @@ fn main() -> anyhow::Result<()> {
     let _telemetry = init_tracing(&cli.log_dir)?;
 
     match cli.command {
-        Commands::DemoExport { output_dir, format } => {
+        Commands::DemoExport {
+            output_dir,
+            format,
+            render_mode,
+        } => {
             std::fs::create_dir_all(&output_dir)?;
             let project = demo_project();
             save_project(&output_dir.join("demo.voltlane.json"), &project)?;
+            let render_mode: RenderMode = render_mode.into();
 
             match format {
                 DemoFormat::Midi => export_midi(&project, &output_dir.join("demo.mid"))?,
-                DemoFormat::Wav => export_wav(&project, &output_dir.join("demo.wav"))?,
-                DemoFormat::Mp3 => export_mp3(&project, &output_dir.join("demo.mp3"), None)?,
+                DemoFormat::Wav => export_wav(&project, &output_dir.join("demo.wav"), render_mode)?,
+                DemoFormat::Mp3 => {
+                    export_mp3(&project, &output_dir.join("demo.mp3"), None, render_mode)?
+                }
+                DemoFormat::StemWav => {
+                    let _paths = export_stem_wav(&project, &output_dir.join("stems"), render_mode)?;
+                }
                 DemoFormat::All => {
                     export_midi(&project, &output_dir.join("demo.mid"))?;
-                    export_wav(&project, &output_dir.join("demo.wav"))?;
-                    if let Err(error) = export_mp3(&project, &output_dir.join("demo.mp3"), None) {
+                    export_wav(&project, &output_dir.join("demo.wav"), render_mode)?;
+                    let _paths = export_stem_wav(&project, &output_dir.join("stems"), render_mode)?;
+                    if let Err(error) =
+                        export_mp3(&project, &output_dir.join("demo.mp3"), None, render_mode)
+                    {
                         tracing::warn!(?error, "mp3 export skipped because ffmpeg is unavailable");
                     }
                 }

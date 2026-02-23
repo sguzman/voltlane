@@ -5,6 +5,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use voltlane_core::RenderMode;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -91,6 +92,8 @@ pub struct WaylandConfig {
 #[serde(default)]
 pub struct ExportConfig {
     pub ffmpeg_binary: String,
+    pub default_render_mode: RenderMode,
+    pub stems_output_dir_name: String,
 }
 
 impl Default for AppConfig {
@@ -190,6 +193,8 @@ impl Default for ExportConfig {
     fn default() -> Self {
         Self {
             ffmpeg_binary: "ffmpeg".to_string(),
+            default_render_mode: RenderMode::Offline,
+            stems_output_dir_name: "stems".to_string(),
         }
     }
 }

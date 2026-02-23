@@ -31,10 +31,19 @@ export interface TrackerRow {
   effect_value: number | null;
 }
 
+export interface ChipMacroLane {
+  target: string;
+  enabled: boolean;
+  values: number[];
+  loop_start: number | null;
+  loop_end: number | null;
+}
+
 export interface PatternClip {
   source_chip: string;
   notes: MidiNote[];
   rows: TrackerRow[];
+  macros: ChipMacroLane[];
   lines_per_beat: number;
 }
 
@@ -209,6 +218,12 @@ export interface UpdatePatternRowsInput {
   lines_per_beat?: number;
 }
 
+export interface UpdatePatternMacrosInput {
+  track_id: string;
+  clip_id: string;
+  macros: ChipMacroLane[];
+}
+
 export interface AddClipNoteInput {
   track_id: string;
   clip_id: string;
@@ -233,12 +248,14 @@ export interface QuantizeClipNotesInput {
   grid_ticks: number;
 }
 
-export type ExportKind = "midi" | "wav" | "mp3";
+export type ExportKind = "midi" | "wav" | "mp3" | "stem_wav";
+export type RenderMode = "offline" | "realtime";
 
 export interface ExportProjectInput {
   kind: ExportKind;
   output_path: string;
   ffmpeg_binary?: string;
+  render_mode?: RenderMode;
 }
 
 export interface PatchTrackInput {

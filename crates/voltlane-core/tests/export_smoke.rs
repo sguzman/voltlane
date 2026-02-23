@@ -1,8 +1,9 @@
 use voltlane_core::{
-    export::{export_midi, export_wav},
+    RenderMode,
+    export::{export_midi, export_stem_wav, export_wav, midi_bytes},
     model::{
-        AudioClip, Clip, ClipPayload, DEFAULT_SAMPLE_RATE, MidiClip, MidiNote, Project, Track,
-        TrackKind,
+        AudioClip, ChipMacroLane, Clip, ClipPayload, DEFAULT_SAMPLE_RATE, MidiClip, MidiNote,
+        PatternClip, Project, Track, TrackKind,
     },
 };
 
@@ -34,7 +35,7 @@ fn midi_and_wav_exports_generate_output() {
     let wav_path = temp_dir.path().join("smoke.wav");
 
     export_midi(&project, &midi_path).expect("midi export should succeed");
-    export_wav(&project, &wav_path).expect("wav export should succeed");
+    export_wav(&project, &wav_path, RenderMode::Offline).expect("wav export should succeed");
 
     let midi_size = std::fs::metadata(&midi_path)
         .expect("midi metadata must exist")
@@ -85,7 +86,8 @@ fn wav_export_renders_audio_clip_payload() {
     project.tracks.push(track);
 
     let output_wav = temp_dir.path().join("audio_clip.wav");
-    export_wav(&project, &output_wav).expect("wav export with audio clip should succeed");
+    export_wav(&project, &output_wav, RenderMode::Offline)
+        .expect("wav export with audio clip should succeed");
     let wav_size = std::fs::metadata(&output_wav)
         .expect("wav metadata must exist")
         .len();
@@ -93,6 +95,131 @@ fn wav_export_renders_audio_clip_payload() {
         wav_size > 44,
         "wav file should include rendered audio samples beyond header"
     );
+}
+
+#[test]
+fn pattern_arpeggio_macro_changes_midi_pitch_output() {
+    let mut project = Project::new("Macro MIDI", 120.0, DEFAULT_SAMPLE_RATE);
+    let mut track = Track::new("Chip", "#ffb347", TrackKind::Chip);
+    track.clips.push(Clip {
+        id: uuid::Uuid::new_v4(),
+        name: "chip-pattern".to_string(),
+        start_tick: 0,
+        length_ticks: 960,
+        disabled: false,
+        payload: ClipPayload::Pattern(PatternClip {
+            source_chip: "gameboy_apu".to_string(),
+            notes: vec![
+                MidiNote {
+                    pitch: 60,
+                    velocity: 100,
+                    start_tick: 0,
+                    length_ticks: 240,
+                    channel: 0,
+                },
+                MidiNote {
+                    pitch: 60,
+                    velocity: 100,
+                    start_tick: 120,
+                    length_ticks: 240,
+                    channel: 0,
+                },
+            ],
+            rows: Vec::new(),
+            macros: vec![ChipMacroLane {
+                target: "arpeggio".to_string(),
+                enabled: true,
+                values: vec![0, 12],
+                loop_start: Some(0),
+                loop_end: Some(1),
+            }],
+            lines_per_beat: 4,
+        }),
+    });
+    project.tracks.push(track);
+
+    let bytes = midi_bytes(&project).expect("midi bytes should render");
+    let smf = midly::Smf::parse(&bytes).expect("rendered midi should parse");
+
+    let mut note_ons = Vec::new();
+    for track in &smf.tracks {
+        for event in track {
+            if let midly::TrackEventKind::Midi { message, .. } = event.kind
+                && let midly::MidiMessage::NoteOn { key, vel } = message
+                && vel.as_int() > 0
+            {
+                note_ons.push(key.as_int());
+            }
+        }
+    }
+
+    assert!(
+        note_ons.contains(&60) && note_ons.contains(&72),
+        "macro arpeggio should emit transposed note-on pitch values"
+    );
+}
+
+#[test]
+fn stem_export_writes_per_track_wav_files() {
+    let mut project = Project::new("Stem Export", 120.0, DEFAULT_SAMPLE_RATE);
+    let mut midi_track = Track::new("Lead Synth", "#18c0ff", TrackKind::Midi);
+    midi_track.clips.push(Clip {
+        id: uuid::Uuid::new_v4(),
+        name: "lead".to_string(),
+        start_tick: 0,
+        length_ticks: 960,
+        disabled: false,
+        payload: ClipPayload::Midi(MidiClip {
+            instrument: Some("Lead".to_string()),
+            notes: vec![MidiNote {
+                pitch: 67,
+                velocity: 110,
+                start_tick: 0,
+                length_ticks: 960,
+                channel: 0,
+            }],
+        }),
+    });
+    project.tracks.push(midi_track);
+
+    let mut chip_track = Track::new("Chip Bass", "#f97316", TrackKind::Chip);
+    chip_track.clips.push(Clip {
+        id: uuid::Uuid::new_v4(),
+        name: "bass".to_string(),
+        start_tick: 0,
+        length_ticks: 960,
+        disabled: false,
+        payload: ClipPayload::Pattern(PatternClip {
+            source_chip: "gameboy_apu".to_string(),
+            notes: vec![MidiNote {
+                pitch: 48,
+                velocity: 100,
+                start_tick: 0,
+                length_ticks: 960,
+                channel: 0,
+            }],
+            rows: Vec::new(),
+            macros: Vec::new(),
+            lines_per_beat: 4,
+        }),
+    });
+    project.tracks.push(chip_track);
+
+    let temp_dir = tempfile::tempdir().expect("tempdir should work");
+    let stem_paths = export_stem_wav(&project, temp_dir.path(), RenderMode::Realtime)
+        .expect("stem export should succeed");
+    assert_eq!(
+        stem_paths.len(),
+        2,
+        "two enabled tracks should produce two stems"
+    );
+    for path in stem_paths {
+        let metadata = std::fs::metadata(path).expect("stem path should exist");
+        assert!(
+            metadata.len() > 44,
+            "stem wav should include rendered audio"
+        );
+    }
 }
 
 fn write_test_wav(path: &std::path::Path, seconds: f32) {

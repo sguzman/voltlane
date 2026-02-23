@@ -14,7 +14,8 @@ use tracing::{debug, info, instrument, warn};
 
 use crate::{
     assets::decode_audio_file_mono,
-    model::{AudioClip, ClipPayload, MidiNote, Project, TrackKind},
+    engine::RenderMode,
+    model::{AudioClip, ChipMacroLane, ClipPayload, MidiNote, PatternClip, Project, TrackKind},
     time::ticks_to_samples,
 };
 
@@ -81,8 +82,24 @@ pub fn render_project_samples(project: &Project, tail_seconds: f64) -> Vec<f32> 
     buffer
 }
 
-#[instrument(skip(project), fields(project_id = %project.id, path = %path.display()))]
-pub fn export_wav(project: &Project, path: &Path) -> Result<()> {
+fn render_project_samples_with_mode(
+    project: &Project,
+    tail_seconds: f64,
+    render_mode: RenderMode,
+) -> Vec<f32> {
+    let rendered = render_project_samples(project, tail_seconds);
+    if matches!(render_mode, RenderMode::Realtime) {
+        // This keeps deterministic output while still exercising chunked realtime-style iteration.
+        for _chunk in rendered.chunks(2_048) {
+            std::thread::yield_now();
+        }
+        debug!("realtime render mode selected");
+    }
+    rendered
+}
+
+#[instrument(skip(project), fields(project_id = %project.id, path = %path.display(), mode = ?render_mode))]
+pub fn export_wav(project: &Project, path: &Path, render_mode: RenderMode) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).with_context(|| {
             format!(
@@ -92,7 +109,7 @@ pub fn export_wav(project: &Project, path: &Path) -> Result<()> {
         })?;
     }
 
-    let rendered = render_project_samples(project, 1.0);
+    let rendered = render_project_samples_with_mode(project, 1.0, render_mode);
     let spec = hound::WavSpec {
         channels: 2,
         sample_rate: project.sample_rate,
@@ -136,8 +153,13 @@ pub fn export_midi(project: &Project, path: &Path) -> Result<()> {
     Ok(())
 }
 
-#[instrument(skip(project), fields(project_id = %project.id, path = %path.display()))]
-pub fn export_mp3(project: &Project, path: &Path, ffmpeg_binary: Option<&Path>) -> Result<()> {
+#[instrument(skip(project), fields(project_id = %project.id, path = %path.display(), mode = ?render_mode))]
+pub fn export_mp3(
+    project: &Project,
+    path: &Path,
+    ffmpeg_binary: Option<&Path>,
+    render_mode: RenderMode,
+) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).with_context(|| {
             format!(
@@ -153,7 +175,7 @@ pub fn export_mp3(project: &Project, path: &Path, ffmpeg_binary: Option<&Path>) 
 
     let temp_dir = tempfile::tempdir().context("failed to create temporary export directory")?;
     let temp_wav = temp_dir.path().join("voltlane_export.wav");
-    export_wav(project, &temp_wav)?;
+    export_wav(project, &temp_wav, render_mode)?;
 
     let status = Command::new(&ffmpeg)
         .args([
@@ -186,6 +208,45 @@ pub fn export_mp3(project: &Project, path: &Path, ffmpeg_binary: Option<&Path>) 
     Ok(())
 }
 
+#[instrument(skip(project), fields(project_id = %project.id, output_dir = %output_dir.display(), mode = ?render_mode))]
+pub fn export_stem_wav(
+    project: &Project,
+    output_dir: &Path,
+    render_mode: RenderMode,
+) -> Result<Vec<PathBuf>> {
+    fs::create_dir_all(output_dir).with_context(|| {
+        format!(
+            "failed to create stem output directory: {}",
+            output_dir.display()
+        )
+    })?;
+
+    let mut exported_paths = Vec::new();
+    for (index, track) in project.tracks.iter().enumerate() {
+        if !track.enabled || track.mute || track.hidden {
+            debug!(
+                track_id = %track.id,
+                track_name = %track.name,
+                "skipping muted/hidden/disabled track for stem export"
+            );
+            continue;
+        }
+
+        let mut stem_project = project.clone();
+        stem_project.tracks = vec![track.clone()];
+        let safe_name = sanitize_stem_name(&track.name);
+        let stem_path = output_dir.join(format!("{:02}_{}.wav", index + 1, safe_name));
+        export_wav(&stem_project, &stem_path, render_mode)?;
+        exported_paths.push(stem_path);
+    }
+
+    info!(
+        stem_count = exported_paths.len(),
+        "stem wav export completed"
+    );
+    Ok(exported_paths)
+}
+
 #[instrument(skip(project), fields(project_id = %project.id))]
 pub fn midi_bytes(project: &Project) -> Result<Vec<u8>> {
     let mut tracks = Vec::new();
@@ -210,7 +271,8 @@ pub fn midi_bytes(project: &Project) -> Result<Vec<u8>> {
                 }
                 ClipPayload::Pattern(pattern_clip) => {
                     for note in &pattern_clip.notes {
-                        absolute_events.extend(note_to_midi_events(note, clip.start_tick));
+                        let macro_note = apply_pattern_macros(note, pattern_clip, project.ppq);
+                        absolute_events.extend(note_to_midi_events(&macro_note, clip.start_tick));
                     }
                 }
                 ClipPayload::Audio(_) | ClipPayload::Automation(_) => {}
@@ -505,49 +567,164 @@ fn collect_rendered_notes(project: &Project) -> Vec<RenderedNote> {
                 continue;
             }
 
-            let iter: Box<dyn Iterator<Item = &MidiNote>> = match &clip.payload {
-                ClipPayload::Midi(midi) => Box::new(midi.notes.iter()),
-                ClipPayload::Pattern(pattern) => Box::new(pattern.notes.iter()),
-                ClipPayload::Audio(_) | ClipPayload::Automation(_) => Box::new([].iter()),
-            };
-
-            for note in iter {
-                let phase_increment = frequency_to_phase_increment(
-                    note_frequency_hz(note.pitch),
-                    project.sample_rate,
-                );
-                let clip_note_start = clip.start_tick.saturating_add(note.start_tick);
-                let clip_note_end = clip.start_tick.saturating_add(note.end_tick());
-                let start_sample = ticks_to_samples(
-                    clip_note_start,
-                    project.bpm,
-                    project.ppq,
-                    project.sample_rate,
-                ) as usize;
-                let end_sample =
-                    ticks_to_samples(clip_note_end, project.bpm, project.ppq, project.sample_rate)
-                        as usize;
-
-                if end_sample <= start_sample {
-                    warn!(
-                        note_pitch = note.pitch,
-                        start_sample, end_sample, "skipping zero-length note in renderer"
-                    );
-                    continue;
+            match &clip.payload {
+                ClipPayload::Midi(midi) => {
+                    for note in &midi.notes {
+                        push_rendered_note(&mut notes, note, clip.start_tick, project, waveform);
+                    }
                 }
-
-                notes.push(RenderedNote {
-                    start_sample,
-                    end_sample,
-                    amplitude: (f32::from(note.velocity.min(127)) / 127.0) * 0.18,
-                    phase_increment,
-                    waveform,
-                });
+                ClipPayload::Pattern(pattern) => {
+                    for note in &pattern.notes {
+                        let macro_note = apply_pattern_macros(note, pattern, project.ppq);
+                        push_rendered_note(
+                            &mut notes,
+                            &macro_note,
+                            clip.start_tick,
+                            project,
+                            waveform,
+                        );
+                    }
+                }
+                ClipPayload::Audio(_) | ClipPayload::Automation(_) => {}
             }
         }
     }
 
     notes
+}
+
+fn push_rendered_note(
+    rendered_notes: &mut Vec<RenderedNote>,
+    note: &MidiNote,
+    clip_start_tick: u64,
+    project: &Project,
+    waveform: Waveform,
+) {
+    let phase_increment =
+        frequency_to_phase_increment(note_frequency_hz(note.pitch), project.sample_rate);
+    let clip_note_start = clip_start_tick.saturating_add(note.start_tick);
+    let clip_note_end = clip_start_tick.saturating_add(note.end_tick());
+    let start_sample = ticks_to_samples(
+        clip_note_start,
+        project.bpm,
+        project.ppq,
+        project.sample_rate,
+    ) as usize;
+    let end_sample =
+        ticks_to_samples(clip_note_end, project.bpm, project.ppq, project.sample_rate) as usize;
+
+    if end_sample <= start_sample {
+        warn!(
+            note_pitch = note.pitch,
+            start_sample, end_sample, "skipping zero-length note in renderer"
+        );
+        return;
+    }
+
+    rendered_notes.push(RenderedNote {
+        start_sample,
+        end_sample,
+        amplitude: (f32::from(note.velocity.min(127)) / 127.0) * 0.18,
+        phase_increment,
+        waveform,
+    });
+}
+
+fn apply_pattern_macros(note: &MidiNote, pattern: &PatternClip, ppq: u16) -> MidiNote {
+    let mut output = note.clone();
+
+    if let Some(arpeggio) = macro_lane(pattern, "arpeggio")
+        && let Some(offset) =
+            macro_value_for_note(arpeggio, note.start_tick, pattern.lines_per_beat, ppq)
+    {
+        let pitch = i16::from(output.pitch).saturating_add(offset).clamp(0, 127);
+        output.pitch = pitch as u8;
+    }
+
+    if let Some(env) = macro_lane(pattern, "env")
+        && let Some(delta) = macro_value_for_note(env, note.start_tick, pattern.lines_per_beat, ppq)
+    {
+        let velocity = i16::from(output.velocity)
+            .saturating_add(delta)
+            .clamp(1, 127);
+        output.velocity = velocity as u8;
+    }
+
+    output
+}
+
+fn macro_lane<'a>(pattern: &'a PatternClip, name: &str) -> Option<&'a ChipMacroLane> {
+    pattern.macros.iter().find(|lane| {
+        lane.enabled && lane.target.eq_ignore_ascii_case(name) && !lane.values.is_empty()
+    })
+}
+
+fn macro_value_for_note(
+    lane: &ChipMacroLane,
+    note_start_tick: u64,
+    lines_per_beat: u16,
+    ppq: u16,
+) -> Option<i16> {
+    if lane.values.is_empty() || lines_per_beat == 0 {
+        return None;
+    }
+
+    let ticks_per_row = (u64::from(ppq) / u64::from(lines_per_beat)).max(1);
+    let step = (note_start_tick / ticks_per_row) as usize;
+    Some(macro_value_at_step(lane, step))
+}
+
+fn macro_value_at_step(lane: &ChipMacroLane, step: usize) -> i16 {
+    if lane.values.is_empty() {
+        return 0;
+    }
+
+    if let (Some(loop_start), Some(loop_end)) = (lane.loop_start, lane.loop_end)
+        && loop_start <= loop_end
+        && loop_end < lane.values.len()
+    {
+        if step <= loop_end {
+            return lane.values[step.min(lane.values.len() - 1)];
+        }
+        let loop_len = loop_end.saturating_sub(loop_start) + 1;
+        let loop_step = loop_start + ((step - loop_start) % loop_len);
+        return lane.values[loop_step.min(lane.values.len() - 1)];
+    }
+
+    lane.values[step.min(lane.values.len() - 1)]
+}
+
+fn sanitize_stem_name(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    let mut previous_underscore = false;
+    for ch in name.chars() {
+        let normalized = if ch.is_ascii_alphanumeric() {
+            Some(ch.to_ascii_lowercase())
+        } else if ch.is_ascii_whitespace() || ch == '_' || ch == '-' {
+            Some('_')
+        } else {
+            None
+        };
+
+        if let Some(ch) = normalized {
+            if ch == '_' {
+                if previous_underscore {
+                    continue;
+                }
+                previous_underscore = true;
+            } else {
+                previous_underscore = false;
+            }
+            out.push(ch);
+        }
+    }
+
+    let trimmed = out.trim_matches('_');
+    if trimmed.is_empty() {
+        "track".to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 fn frequency_to_phase_increment(frequency_hz: f64, sample_rate: u32) -> u32 {

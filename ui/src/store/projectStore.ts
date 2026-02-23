@@ -24,6 +24,7 @@ import {
   setPlayback,
   transposeClipNotes,
   updateAudioClip,
+  updatePatternMacros,
   updatePatternRows,
   updateClipNotes
 } from "../api/tauri";
@@ -31,7 +32,9 @@ import { logger } from "../lib/logger";
 import type {
   AudioAnalysis,
   AudioAssetEntry,
+  ChipMacroLane,
   ExportKind,
+  RenderMode,
   MidiNote,
   ParityReport,
   Project,
@@ -54,6 +57,7 @@ interface ProjectStore {
   loading: boolean;
   error: string | null;
   outputRoot: string;
+  exportRenderMode: RenderMode;
   selectedTrackId: string | null;
   selectedClipId: string | null;
   audioAssets: AudioAssetEntry[];
@@ -87,6 +91,11 @@ interface ProjectStore {
     rows: TrackerRow[],
     linesPerBeat?: number
   ) => Promise<void>;
+  replacePatternMacros: (
+    trackId: string,
+    clipId: string,
+    macros: ChipMacroLane[]
+  ) => Promise<void>;
   transposeClip: (trackId: string, clipId: string, semitones: number) => Promise<void>;
   quantizeClip: (trackId: string, clipId: string, gridTicks: number) => Promise<void>;
   scanAudioLibrary: (directory?: string) => Promise<void>;
@@ -107,6 +116,7 @@ interface ProjectStore {
     }
   ) => Promise<void>;
   runExport: (kind: ExportKind) => Promise<void>;
+  setExportRenderMode: (mode: RenderMode) => void;
   saveCurrentProject: () => Promise<void>;
   loadCurrentProject: () => Promise<void>;
   runAutosave: () => Promise<void>;
@@ -135,7 +145,17 @@ function extensionFor(kind: ExportKind): string {
       return "wav";
     case "mp3":
       return "mp3";
+    case "stem_wav":
+      return "wav";
   }
+}
+
+function exportPathFor(kind: ExportKind, outputRoot: string, projectTitle: string): string {
+  const slug = projectTitle.replace(/\s+/g, "_").toLowerCase();
+  if (kind === "stem_wav") {
+    return `${outputRoot}/${slug}/stems`;
+  }
+  return `${outputRoot}/${slug}.${extensionFor(kind)}`;
 }
 
 async function withErrorHandling(
@@ -160,6 +180,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   loading: false,
   error: null,
   outputRoot: "data/exports",
+  exportRenderMode: "offline",
   selectedTrackId: null,
   selectedClipId: null,
   audioAssets: [],
@@ -345,6 +366,18 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     });
   },
 
+  replacePatternMacros: async (trackId, clipId, macros) => {
+    await withErrorHandling(set, async () => {
+      const updated = await updatePatternMacros({
+        track_id: trackId,
+        clip_id: clipId,
+        macros
+      });
+      set({ project: updated, selectedTrackId: trackId, selectedClipId: clipId });
+      await get().refreshParity();
+    });
+  },
+
   transposeClip: async (trackId, clipId, semitones) => {
     await withErrorHandling(set, async () => {
       const updated = await transposeClipNotes({
@@ -468,13 +501,14 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         return;
       }
 
-      const path = `${get().outputRoot}/${project.title.replace(/\s+/g, "_").toLowerCase()}.${extensionFor(
-        kind
-      )}`;
-      await exportProject({ kind, output_path: path });
-      logger.info("export completed", { kind, path });
+      const path = exportPathFor(kind, get().outputRoot, project.title);
+      const renderMode = get().exportRenderMode;
+      await exportProject({ kind, output_path: path, render_mode: renderMode });
+      logger.info("export completed", { kind, path, render_mode: renderMode });
     });
   },
+
+  setExportRenderMode: (mode) => set({ exportRenderMode: mode }),
 
   saveCurrentProject: async () => {
     await withErrorHandling(set, async () => {

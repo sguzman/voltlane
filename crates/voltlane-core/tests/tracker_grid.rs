@@ -74,3 +74,44 @@ fn tracker_rows_reject_zero_lines_per_beat() {
 
     assert!(matches!(error, EngineError::InvalidTrackerLinesPerBeat(0)));
 }
+
+#[test]
+fn pattern_macros_can_be_replaced() {
+    let project = demo_project();
+    let track_id = project.tracks[1].id;
+    let clip_id = project.tracks[1].clips[0].id;
+    let mut engine = Engine::new(project);
+
+    engine
+        .upsert_pattern_macros(
+            track_id,
+            clip_id,
+            vec![
+                voltlane_core::ChipMacroLane {
+                    target: "arpeggio".to_string(),
+                    enabled: true,
+                    values: vec![0, 4, 7],
+                    loop_start: Some(0),
+                    loop_end: Some(2),
+                },
+                voltlane_core::ChipMacroLane {
+                    target: "env".to_string(),
+                    enabled: true,
+                    values: vec![0, -8, -16, -24],
+                    loop_start: Some(1),
+                    loop_end: Some(3),
+                },
+            ],
+        )
+        .expect("pattern macro update should succeed");
+
+    let clip = &engine.project().tracks[1].clips[0];
+    let pattern = match &clip.payload {
+        voltlane_core::model::ClipPayload::Pattern(pattern) => pattern,
+        _ => panic!("fixture clip payload should be pattern"),
+    };
+
+    assert_eq!(pattern.macros.len(), 2);
+    assert_eq!(pattern.macros[0].target, "arpeggio");
+    assert_eq!(pattern.macros[1].target, "env");
+}

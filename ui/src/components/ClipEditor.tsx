@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 
-import type { Clip, MidiNote, TrackerRow } from "../types";
+import type { ChipMacroLane, Clip, MidiNote, TrackerRow } from "../types";
 
 interface ClipEditorProps {
   clip: Clip | null;
@@ -17,6 +17,7 @@ interface ClipEditorProps {
     rows: TrackerRow[],
     linesPerBeat?: number
   ) => void;
+  onReplacePatternMacros: (trackId: string, clipId: string, macros: ChipMacroLane[]) => void;
   onTranspose: (trackId: string, clipId: string, semitones: number) => void;
   onQuantize: (trackId: string, clipId: string, gridTicks: number) => void;
   onPatchAudioClip: (
@@ -55,6 +56,13 @@ function clipTrackerRows(clip: Clip | null): TrackerRow[] {
   return clip.payload.pattern.rows;
 }
 
+function clipPatternMacros(clip: Clip | null): ChipMacroLane[] {
+  if (!clip || !("pattern" in clip.payload)) {
+    return [];
+  }
+  return clip.payload.pattern.macros;
+}
+
 export function ClipEditor({
   clip,
   trackId,
@@ -65,6 +73,7 @@ export function ClipEditor({
   onRemoveNote,
   onReplaceNotes,
   onReplacePatternRows,
+  onReplacePatternMacros,
   onTranspose,
   onQuantize,
   onPatchAudioClip
@@ -73,6 +82,7 @@ export function ClipEditor({
   const [clipLength, setClipLength] = useState(1_920);
   const [draftNotes, setDraftNotes] = useState<MidiNote[]>([]);
   const [draftRows, setDraftRows] = useState<TrackerRow[]>([]);
+  const [draftMacros, setDraftMacros] = useState<ChipMacroLane[]>([]);
   const [linesPerBeat, setLinesPerBeat] = useState(4);
   const [audioGainDb, setAudioGainDb] = useState(0);
   const [audioPan, setAudioPan] = useState(0);
@@ -88,6 +98,7 @@ export function ClipEditor({
     setClipLength(clip?.length_ticks ?? 1_920);
     setDraftNotes(clipNotes(clip));
     setDraftRows(clipTrackerRows(clip));
+    setDraftMacros(clipPatternMacros(clip));
     if (clip && "pattern" in clip.payload) {
       setLinesPerBeat(clip.payload.pattern.lines_per_beat);
     } else {
@@ -514,6 +525,137 @@ export function ClipEditor({
                 {draftRows.length === 0 ? (
                   <tr>
                     <td colSpan={8}>No tracker rows yet.</td>
+                  </tr>
+                ) : null}
+              </tbody>
+            </table>
+          </div>
+
+          <h3 className="clip-editor__subheading">Chip Macros</h3>
+          <div className="clip-editor__actions">
+            <button
+              type="button"
+              className="pill"
+              disabled={loading}
+              onClick={() => {
+                setDraftMacros([
+                  ...draftMacros,
+                  {
+                    target: "arpeggio",
+                    enabled: true,
+                    values: [0, 4, 7],
+                    loop_start: 0,
+                    loop_end: 2
+                  }
+                ]);
+              }}
+            >
+              Add Macro Lane
+            </button>
+            <button
+              type="button"
+              className="pill"
+              disabled={loading}
+              onClick={() => onReplacePatternMacros(trackId, clip.id, draftMacros)}
+            >
+              Save Macros
+            </button>
+          </div>
+
+          <div className="clip-editor__table-wrap">
+            <table className="clip-editor__table clip-editor__table--tracker">
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>Target</th>
+                  <th>Enabled</th>
+                  <th>Values</th>
+                  <th>Loop Start</th>
+                  <th>Loop End</th>
+                  <th />
+                </tr>
+              </thead>
+              <tbody>
+                {draftMacros.map((lane, index) => (
+                  <tr key={`${lane.target}-${index}`}>
+                    <td>{index + 1}</td>
+                    <td>
+                      <input
+                        value={lane.target}
+                        onChange={(event) => {
+                          const next = [...draftMacros];
+                          next[index] = { ...lane, target: event.target.value };
+                          setDraftMacros(next);
+                        }}
+                      />
+                    </td>
+                    <td>
+                      <input
+                        type="checkbox"
+                        checked={lane.enabled}
+                        onChange={(event) => {
+                          const next = [...draftMacros];
+                          next[index] = { ...lane, enabled: event.target.checked };
+                          setDraftMacros(next);
+                        }}
+                      />
+                    </td>
+                    <td>
+                      <input
+                        value={lane.values.join(",")}
+                        onChange={(event) => {
+                          const values = event.target.value
+                            .split(",")
+                            .map((value) => Number(value.trim()))
+                            .filter((value) => Number.isFinite(value));
+                          const next = [...draftMacros];
+                          next[index] = { ...lane, values };
+                          setDraftMacros(next);
+                        }}
+                      />
+                    </td>
+                    <td>
+                      <input
+                        type="number"
+                        min={0}
+                        value={lane.loop_start ?? 0}
+                        onChange={(event) => {
+                          const next = [...draftMacros];
+                          next[index] = { ...lane, loop_start: Number(event.target.value) };
+                          setDraftMacros(next);
+                        }}
+                      />
+                    </td>
+                    <td>
+                      <input
+                        type="number"
+                        min={0}
+                        value={lane.loop_end ?? 0}
+                        onChange={(event) => {
+                          const next = [...draftMacros];
+                          next[index] = { ...lane, loop_end: Number(event.target.value) };
+                          setDraftMacros(next);
+                        }}
+                      />
+                    </td>
+                    <td>
+                      <button
+                        type="button"
+                        className="mini"
+                        disabled={loading}
+                        onClick={() => {
+                          const next = draftMacros.filter((_, candidateIndex) => candidateIndex !== index);
+                          setDraftMacros(next);
+                        }}
+                      >
+                        Delete
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+                {draftMacros.length === 0 ? (
+                  <tr>
+                    <td colSpan={7}>No macro lanes yet.</td>
                   </tr>
                 ) : null}
               </tbody>

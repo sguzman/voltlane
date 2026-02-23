@@ -311,6 +311,11 @@ input {
   font-weight: 600;
 }
 
+.clip-editor__subheading {
+  margin: 0.75rem 0 0.45rem;
+  font-size: 0.92rem;
+}
+
 .clip-editor__actions {
   display: flex;
   flex-wrap: wrap;

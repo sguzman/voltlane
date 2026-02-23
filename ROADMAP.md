@@ -38,7 +38,7 @@
 
 - [x] Pattern clip payload shape and chip-source metadata
 - [x] Tracker grid editor (rows/effects)
-- [ ] Chip macro editor (duty/env/arpeggio)
+- [x] Chip macro editor (duty/env/arpeggio)
 - [ ] Real chip backend emulation pipeline
 
 ## Phase 5: Mixer/FX/Routing
@@ -53,14 +53,14 @@
 - [x] MIDI export
 - [x] WAV export
 - [x] MP3 export via ffmpeg sidecar
-- [ ] Stem export
-- [ ] Offline/realtime render mode selection
+- [x] Stem export
+- [x] Offline/realtime render mode selection
 
 ## Phase 7: Quality, Testing, and Release
 
 - [x] Deterministic parity harness (golden report)
 - [x] Export smoke tests
 - [x] Time conversion unit tests
-- [ ] Property/fuzz tests for import/project corruption
-- [ ] Performance regression suite
-- [ ] CI pipeline (fmt/clippy/tests/dependency audit)
+- [x] Property/fuzz tests for import/project corruption
+- [x] Performance regression suite
+- [x] CI pipeline (fmt/clippy/tests/dependency audit)

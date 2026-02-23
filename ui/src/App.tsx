@@ -18,6 +18,7 @@ export default function App() {
     parity,
     loading,
     error,
+    exportRenderMode,
     selectedTrackId,
     selectedClipId,
     audioAssets,
@@ -38,6 +39,7 @@ export default function App() {
     removeNoteAt,
     replaceClipNotes,
     replacePatternRows,
+    replacePatternMacros,
     transposeClip,
     quantizeClip,
     scanAudioLibrary,
@@ -45,6 +47,7 @@ export default function App() {
     importAudioAsset,
     patchAudioClipSettings,
     runExport,
+    setExportRenderMode,
     saveCurrentProject,
     loadCurrentProject,
     runAutosave,
@@ -86,6 +89,8 @@ export default function App() {
           void configureLoop(enabled, loopStartTick, loopEndTick)
         }
         onExport={(kind) => void runExport(kind)}
+        exportRenderMode={exportRenderMode}
+        onExportRenderModeChange={setExportRenderMode}
         onAutosave={() => void runAutosave()}
         onSave={() => void saveCurrentProject()}
         onLoad={() => void loadCurrentProject()}
@@ -218,6 +223,9 @@ export default function App() {
           onReplaceNotes={(trackId, clipId, notes) => void replaceClipNotes(trackId, clipId, notes)}
           onReplacePatternRows={(trackId, clipId, rows, linesPerBeat) =>
             void replacePatternRows(trackId, clipId, rows, linesPerBeat)
+          }
+          onReplacePatternMacros={(trackId, clipId, macros) =>
+            void replacePatternMacros(trackId, clipId, macros)
           }
           onTranspose={(trackId, clipId, semitones) => void transposeClip(trackId, clipId, semitones)}
           onQuantize={(trackId, clipId, gridTicks) => void quantizeClip(trackId, clipId, gridTicks)}

@@ -41,3 +41,5 @@ disable_dmabuf_renderer = true
 
 [export]
 ffmpeg_binary = "ffmpeg"
+default_render_mode = "offline"
+stems_output_dir_name = "stems"

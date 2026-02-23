@@ -10,9 +10,10 @@ use tauri_plugin_log::{Target, TargetKind, log::LevelFilter};
 use tracing::{error, info, instrument};
 use uuid::Uuid;
 use voltlane_core::{
-    AddClipRequest, AddTrackRequest, AudioAnalysis, AudioAssetEntry, AudioClipPatch, ClipPayload,
-    DEFAULT_TRACKER_LINES_PER_BEAT, Engine, ExportKind, MidiClip, MidiNote, ParityReport,
-    PatternClip, Project, TrackStatePatch, TrackerRow, init_tracing_with_options,
+    AddClipRequest, AddTrackRequest, AudioAnalysis, AudioAssetEntry, AudioClipPatch, ChipMacroLane,
+    ClipPayload, DEFAULT_TRACKER_LINES_PER_BEAT, Engine, ExportKind, MidiClip, MidiNote,
+    ParityReport, PatternClip, Project, RenderMode, TrackStatePatch, TrackerRow,
+    init_tracing_with_options,
 };
 
 use crate::config::{AppConfig, AppMode};
@@ -121,6 +122,13 @@ struct UpdatePatternRowsInput {
 }
 
 #[derive(Debug, Deserialize)]
+struct UpdatePatternMacrosInput {
+    track_id: String,
+    clip_id: String,
+    macros: Vec<ChipMacroLane>,
+}
+
+#[derive(Debug, Deserialize)]
 struct AddClipNoteInput {
     track_id: String,
     clip_id: String,
@@ -153,6 +161,7 @@ struct ExportProjectInput {
     kind: ExportKind,
     output_path: String,
     ffmpeg_binary: Option<String>,
+    render_mode: Option<RenderMode>,
 }
 
 #[instrument(skip(state))]
@@ -230,6 +239,7 @@ fn add_midi_clip(state: State<'_, AppState>, input: AddMidiClipInput) -> Result<
             source_chip,
             notes: input.notes,
             rows: Vec::new(),
+            macros: Vec::new(),
             lines_per_beat: DEFAULT_TRACKER_LINES_PER_BEAT,
         })
     } else {
@@ -411,6 +421,22 @@ fn update_pattern_rows(
 
 #[instrument(skip(state, input))]
 #[tauri::command]
+fn update_pattern_macros(
+    state: State<'_, AppState>,
+    input: UpdatePatternMacrosInput,
+) -> Result<Project, String> {
+    let track_id = parse_uuid(&input.track_id)?;
+    let clip_id = parse_uuid(&input.clip_id)?;
+    let mut engine = state.engine.lock();
+    engine
+        .upsert_pattern_macros(track_id, clip_id, input.macros)
+        .map_err(|error| error.to_string())?;
+
+    Ok(engine.project().clone())
+}
+
+#[instrument(skip(state, input))]
+#[tauri::command]
 fn add_clip_note(state: State<'_, AppState>, input: AddClipNoteInput) -> Result<Project, String> {
     let track_id = parse_uuid(&input.track_id)?;
     let clip_id = parse_uuid(&input.clip_id)?;
@@ -511,11 +537,21 @@ fn export_project(state: State<'_, AppState>, input: ExportProjectInput) -> Resu
         .as_deref()
         .unwrap_or(state.config.export.ffmpeg_binary.as_str());
     let ffmpeg_binary = Some(Path::new(ffmpeg_path));
+    let render_mode = input
+        .render_mode
+        .unwrap_or(state.config.export.default_render_mode);
+    let output_path =
+        if matches!(input.kind, ExportKind::StemWav) && input.output_path.trim().is_empty() {
+            resolve_dev_path(&state.config.paths.dev_export_dir)
+                .join(&state.config.export.stems_output_dir_name)
+        } else {
+            PathBuf::from(&input.output_path)
+        };
 
     engine
-        .export(input.kind, Path::new(&input.output_path), ffmpeg_binary)
+        .export(input.kind, &output_path, ffmpeg_binary, render_mode)
         .map_err(|error| error.to_string())?;
-    Ok(input.output_path)
+    Ok(output_path.display().to_string())
 }
 
 #[instrument(skip(state), fields(path = %path))]
@@ -706,6 +742,7 @@ pub fn run() {
             move_clip,
             update_clip_notes,
             update_pattern_rows,
+            update_pattern_macros,
             add_clip_note,
             remove_clip_note,
             transpose_clip_notes,

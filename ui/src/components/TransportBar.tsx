@@ -1,13 +1,15 @@
 import { useEffect, useState } from "react";
 
-import type { Project } from "../types";
+import type { Project, RenderMode } from "../types";
 
 interface TransportBarProps {
   project: Project;
   loading: boolean;
   onPlay: (isPlaying: boolean) => void;
   onLoopToggle: (enabled: boolean, loopStartTick?: number, loopEndTick?: number) => void;
-  onExport: (kind: "midi" | "wav" | "mp3") => void;
+  onExport: (kind: "midi" | "wav" | "mp3" | "stem_wav") => void;
+  exportRenderMode: RenderMode;
+  onExportRenderModeChange: (mode: RenderMode) => void;
   onAutosave: () => void;
   onSave: () => void;
   onLoad: () => void;
@@ -19,6 +21,8 @@ export function TransportBar({
   onPlay,
   onLoopToggle,
   onExport,
+  exportRenderMode,
+  onExportRenderModeChange,
   onAutosave,
   onSave,
   onLoad
@@ -91,6 +95,16 @@ export function TransportBar({
       </section>
 
       <section className="transport__section transport__actions">
+        <label className="transport__field">
+          <span>Render Mode</span>
+          <select
+            value={exportRenderMode}
+            onChange={(event) => onExportRenderModeChange(event.target.value as RenderMode)}
+          >
+            <option value="offline">Offline</option>
+            <option value="realtime">Realtime</option>
+          </select>
+        </label>
         <button type="button" className="pill" onClick={() => onExport("midi")} disabled={loading}>
           Export MIDI
         </button>
@@ -99,6 +113,9 @@ export function TransportBar({
         </button>
         <button type="button" className="pill" onClick={() => onExport("mp3")} disabled={loading}>
           Export MP3
+        </button>
+        <button type="button" className="pill" onClick={() => onExport("stem_wav")} disabled={loading}>
+          Export Stems
         </button>
         <button type="button" className="pill" onClick={onAutosave} disabled={loading}>
           Autosave

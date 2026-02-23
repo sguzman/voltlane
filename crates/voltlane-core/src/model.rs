@@ -202,6 +202,8 @@ pub struct PatternClip {
     pub notes: Vec<MidiNote>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rows: Vec<TrackerRow>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub macros: Vec<ChipMacroLane>,
     #[serde(
         default = "default_tracker_lines_per_beat",
         skip_serializing_if = "is_default_tracker_lines_per_beat"
@@ -215,7 +217,30 @@ impl Default for PatternClip {
             source_chip: String::new(),
             notes: Vec::new(),
             rows: Vec::new(),
+            macros: Vec::new(),
             lines_per_beat: default_tracker_lines_per_beat(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct ChipMacroLane {
+    pub target: String,
+    pub enabled: bool,
+    pub values: Vec<i16>,
+    pub loop_start: Option<usize>,
+    pub loop_end: Option<usize>,
+}
+
+impl Default for ChipMacroLane {
+    fn default() -> Self {
+        Self {
+            target: String::new(),
+            enabled: true,
+            values: Vec::new(),
+            loop_start: None,
+            loop_end: None,
         }
     }
 }

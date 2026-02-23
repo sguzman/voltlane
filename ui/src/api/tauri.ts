@@ -23,6 +23,7 @@ import type {
   TrackKind,
   TransposeClipNotesInput,
   UpdateAudioClipInput,
+  UpdatePatternMacrosInput,
   UpdatePatternRowsInput,
   UpdateClipNotesInput
 } from "../types";
@@ -316,6 +317,7 @@ async function invokeMock<T>(command: string, args?: Record<string, unknown>): P
                 source_chip: input.source_chip,
                 notes: input.notes,
                 rows: notesToTrackerRows(input.notes),
+                macros: [],
                 lines_per_beat: 4
               }
             }
@@ -486,6 +488,26 @@ async function invokeMock<T>(command: string, args?: Record<string, unknown>): P
         }))
         .sort((left, right) => left.row - right.row);
       clip.payload.pattern.notes = trackerRowsToNotes(clip.payload.pattern.rows, linesPerBeat, mockProject.ppq);
+      touchProject();
+      return mockProject as T;
+    }
+
+    case "update_pattern_macros": {
+      const input = args?.input as UpdatePatternMacrosInput;
+      const { clip } = getClipRefs(mockProject, input.track_id, input.clip_id);
+      if (!("pattern" in clip.payload)) {
+        throw new Error(`clip payload is not pattern: ${input.clip_id}`);
+      }
+
+      clip.payload.pattern.macros = input.macros.map((lane) => ({
+        target: lane.target.trim().toLowerCase(),
+        enabled: Boolean(lane.enabled),
+        values: lane.values
+          .slice(0, 256)
+          .map((value) => Math.max(-127, Math.min(127, Math.round(value)))),
+        loop_start: typeof lane.loop_start === "number" ? Math.max(0, Math.round(lane.loop_start)) : null,
+        loop_end: typeof lane.loop_end === "number" ? Math.max(0, Math.round(lane.loop_end)) : null
+      }));
       touchProject();
       return mockProject as T;
     }
@@ -681,6 +703,10 @@ export async function updateClipNotes(input: UpdateClipNotesInput): Promise<Proj
 
 export async function updatePatternRows(input: UpdatePatternRowsInput): Promise<Project> {
   return invokeCommand<Project>("update_pattern_rows", { input });
+}
+
+export async function updatePatternMacros(input: UpdatePatternMacrosInput): Promise<Project> {
+  return invokeCommand<Project>("update_pattern_macros", { input });
 }
 
 export async function addClipNote(input: AddClipNoteInput): Promise<Project> {
