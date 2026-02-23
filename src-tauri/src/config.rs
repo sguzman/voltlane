@@ -108,7 +108,7 @@ impl Default for MidiConfig {
         Self {
             default_soundfont_path: PathBuf::from("src-tauri/res/soundfonts/piano.sf2"),
             default_soundfont_license_path: PathBuf::from(
-                "src-tauri/res/licenses/piano.sf2.LICENSE.txt",
+                "src-tauri/res/soundfonts/piano.sf2.LICENSE",
             ),
         }
     }

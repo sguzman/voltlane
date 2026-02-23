@@ -29,8 +29,7 @@
     "active": true,
     "targets": "all",
     "resources": [
-      "res/soundfonts/**",
-      "res/licenses/**"
+      "res/soundfonts/**/*"
     ],
     "icon": [
       "icons/32x32.png",

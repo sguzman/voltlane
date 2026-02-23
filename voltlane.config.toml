@@ -7,7 +7,7 @@ default_sample_rate = 48000
 
 [midi]
 default_soundfont_path = "src-tauri/res/soundfonts/piano.sf2"
-default_soundfont_license_path = "src-tauri/res/licenses/piano.sf2.LICENSE.txt"
+default_soundfont_license_path = "src-tauri/res/soundfonts/piano.sf2.LICENSE"
 
 [transport]
 default_loop_start_tick = 0

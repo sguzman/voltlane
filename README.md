@@ -38,7 +38,6 @@ The current implementation targets Milestone A/B from your planning document: pr
 - `scripts/run_parity_harness.sh`: parity harness runner
 - `ROADMAP.md`: progress tracker with checkboxes
 - `src-tauri/res/soundfonts`: bundled SoundFonts
-- `src-tauri/res/licenses`: third-party asset license records
 
 ## Build and Run
 
@@ -61,7 +60,7 @@ In `dev` mode, each app launch writes timestamped Rust tracing logs into:
 MIDI SoundFont defaults are configured here too:
 
 - `midi.default_soundfont_path = "src-tauri/res/soundfonts/piano.sf2"`
-- `midi.default_soundfont_license_path = "src-tauri/res/licenses/piano.sf2.LICENSE.txt"`
+- `midi.default_soundfont_license_path = "src-tauri/res/soundfonts/piano.sf2.LICENSE"`
 
 ### Install dependencies
 
@@ -142,8 +141,9 @@ UPDATE_PARITY_BASELINE=1 cargo test -p voltlane-core parity_report_matches_golde
 ## SoundFont Asset
 
 - Integrated SoundFont: `src-tauri/res/soundfonts/piano.sf2`
-- License record file: `src-tauri/res/licenses/piano.sf2.LICENSE.txt`
-- The integrated license file is currently a placeholder because no upstream license text was present in `tmp/`.
+- SoundFont package readme: `src-tauri/res/soundfonts/README.md`
+- License record file: `src-tauri/res/soundfonts/piano.sf2.LICENSE`
+- License metadata indicates TimGM6mb is GPL-2 (see license file for full details).
 
 ## Status
 
