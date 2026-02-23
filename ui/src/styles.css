@@ -27,7 +27,8 @@ body {
 }
 
 button,
-input {
+input,
+select {
   font: inherit;
 }
 
@@ -107,6 +108,14 @@ input {
   background: #fff;
 }
 
+.transport__field select {
+  width: 6.25rem;
+  border: 1px solid var(--line);
+  border-radius: 0.5rem;
+  padding: 0.3rem 0.45rem;
+  background: #fff;
+}
+
 .workspace {
   margin-top: 1rem;
   display: grid;
@@ -138,6 +147,13 @@ input {
 }
 
 .field input {
+  border: 1px solid var(--line);
+  border-radius: 0.65rem;
+  padding: 0.5rem 0.65rem;
+  background: #fff;
+}
+
+.field select {
   border: 1px solid var(--line);
   border-radius: 0.65rem;
   padding: 0.5rem 0.65rem;
@@ -351,6 +367,61 @@ input {
 .clip-editor__table--tracker input[type="checkbox"] {
   width: auto;
   min-width: 0;
+}
+
+.piano-roll {
+  position: relative;
+  border: 1px solid var(--line);
+  border-radius: 0.7rem;
+  margin-bottom: 0.6rem;
+  background: linear-gradient(180deg, rgba(16, 37, 42, 0.05), rgba(16, 37, 42, 0.02));
+  overflow: hidden;
+}
+
+.piano-roll__row {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 14px;
+  border-top: 1px solid rgba(16, 37, 42, 0.06);
+}
+
+.piano-roll__row--octave {
+  border-top-color: rgba(12, 169, 167, 0.2);
+}
+
+.piano-roll__note {
+  position: absolute;
+  border-radius: 0.35rem;
+  background: color-mix(in srgb, var(--accent) 68%, white);
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--line));
+  cursor: grab;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.2rem;
+  padding: 0 0.15rem;
+}
+
+.piano-roll__note:active {
+  cursor: grabbing;
+}
+
+.piano-roll__note-label {
+  font-size: 0.63rem;
+  color: color-mix(in srgb, var(--text) 80%, black);
+  font-weight: 700;
+  pointer-events: none;
+}
+
+.piano-roll__resize {
+  border: 0;
+  width: 6px;
+  height: calc(100% - 2px);
+  border-radius: 4px;
+  padding: 0;
+  background: rgba(16, 37, 42, 0.2);
+  cursor: ew-resize;
 }
 
 .field--checkbox {

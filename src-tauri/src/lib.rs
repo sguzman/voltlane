@@ -1,19 +1,22 @@
 mod config;
 
-use std::path::{Path, PathBuf};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 use anyhow::Context;
 use parking_lot::Mutex;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tauri::{Manager, State};
 use tauri_plugin_log::{Target, TargetKind, log::LevelFilter};
 use tracing::{error, info, instrument};
 use uuid::Uuid;
 use voltlane_core::{
-    AddClipRequest, AddTrackRequest, AudioAnalysis, AudioAssetEntry, AudioClipPatch, ChipMacroLane,
-    ClipPayload, DEFAULT_TRACKER_LINES_PER_BEAT, Engine, ExportKind, MidiClip, MidiNote,
-    ParityReport, PatternClip, Project, RenderMode, TrackStatePatch, TrackerRow,
-    init_tracing_with_options,
+    AddClipRequest, AddTrackRequest, AudioAnalysis, AudioAssetEntry, AudioClipPatch,
+    AutomationPoint, ChipMacroLane, ClipPayload, DEFAULT_TRACKER_LINES_PER_BEAT, Engine,
+    ExportKind, MidiClip, MidiNote, ParityReport, PatternClip, Project, RenderMode, TrackMixPatch,
+    TrackSend, TrackStatePatch, TrackerRow, init_tracing_with_options,
 };
 
 use crate::config::{AppConfig, AppMode};
@@ -99,6 +102,37 @@ struct PatchTrackInput {
 }
 
 #[derive(Debug, Deserialize)]
+struct PatchTrackMixInput {
+    track_id: String,
+    gain_db: Option<f32>,
+    pan: Option<f32>,
+    output_bus_id: Option<String>,
+    clear_output_bus: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TrackSendInput {
+    id: Option<String>,
+    target_bus_id: String,
+    level_db: Option<f32>,
+    pan: Option<f32>,
+    pre_fader: Option<bool>,
+    enabled: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpsertTrackSendInput {
+    track_id: String,
+    send: TrackSendInput,
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoveTrackSendInput {
+    track_id: String,
+    send_id: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct MoveClipInput {
     track_id: String,
     clip_id: String,
@@ -154,6 +188,31 @@ struct QuantizeClipNotesInput {
     track_id: String,
     clip_id: String,
     grid_ticks: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct AddAutomationClipInput {
+    track_id: String,
+    name: String,
+    start_tick: u64,
+    length_ticks: u64,
+    target_parameter_id: Option<String>,
+    points: Vec<AutomationPoint>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateAutomationClipInput {
+    track_id: String,
+    clip_id: String,
+    target_parameter_id: Option<String>,
+    points: Vec<AutomationPoint>,
+}
+
+#[derive(Debug, Serialize)]
+struct AutosaveStatusOutput {
+    exists: bool,
+    path: Option<String>,
+    modified_epoch_ms: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -221,6 +280,82 @@ fn patch_track_state(
 
 #[instrument(skip(state, input))]
 #[tauri::command]
+fn patch_track_mix(
+    state: State<'_, AppState>,
+    input: PatchTrackMixInput,
+) -> Result<Project, String> {
+    let track_id = parse_uuid(&input.track_id)?;
+    let output_bus = if input.clear_output_bus.unwrap_or(false) {
+        Some(None)
+    } else if let Some(output_bus_id) = input.output_bus_id {
+        Some(Some(parse_uuid(&output_bus_id)?))
+    } else {
+        None
+    };
+
+    let mut engine = state.engine.lock();
+    engine
+        .patch_track_mix(
+            track_id,
+            TrackMixPatch {
+                gain_db: input.gain_db,
+                pan: input.pan,
+                output_bus,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+
+    Ok(engine.project().clone())
+}
+
+#[instrument(skip(state, input))]
+#[tauri::command]
+fn upsert_track_send(
+    state: State<'_, AppState>,
+    input: UpsertTrackSendInput,
+) -> Result<Project, String> {
+    let track_id = parse_uuid(&input.track_id)?;
+    let target_bus = parse_uuid(&input.send.target_bus_id)?;
+    let send_id = if let Some(id) = input.send.id {
+        parse_uuid(&id)?
+    } else {
+        Uuid::new_v4()
+    };
+
+    let mut engine = state.engine.lock();
+    engine
+        .upsert_track_send(
+            track_id,
+            TrackSend {
+                id: send_id,
+                target_bus,
+                level_db: input.send.level_db.unwrap_or(0.0),
+                pan: input.send.pan.unwrap_or(0.0),
+                pre_fader: input.send.pre_fader.unwrap_or(false),
+                enabled: input.send.enabled.unwrap_or(true),
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(engine.project().clone())
+}
+
+#[instrument(skip(state, input))]
+#[tauri::command]
+fn remove_track_send(
+    state: State<'_, AppState>,
+    input: RemoveTrackSendInput,
+) -> Result<Project, String> {
+    let track_id = parse_uuid(&input.track_id)?;
+    let send_id = parse_uuid(&input.send_id)?;
+    let mut engine = state.engine.lock();
+    engine
+        .remove_track_send(track_id, send_id)
+        .map_err(|error| error.to_string())?;
+    Ok(engine.project().clone())
+}
+
+#[instrument(skip(state, input))]
+#[tauri::command]
 fn reorder_track(state: State<'_, AppState>, input: ReorderTrackInput) -> Result<Project, String> {
     let mut engine = state.engine.lock();
     engine
@@ -262,6 +397,33 @@ fn add_midi_clip(state: State<'_, AppState>, input: AddMidiClipInput) -> Result<
         .add_clip(request)
         .map_err(|error| error.to_string())?;
     Ok(engine.project().clone())
+}
+
+#[instrument(skip(state, input))]
+#[tauri::command]
+fn add_automation_clip(
+    state: State<'_, AppState>,
+    input: AddAutomationClipInput,
+) -> Result<Project, String> {
+    let track_id = parse_uuid(&input.track_id)?;
+    let mut engine = state.engine.lock();
+    engine
+        .add_automation_clip(
+            track_id,
+            input.name,
+            input.start_tick,
+            input.length_ticks,
+            input.target_parameter_id.unwrap_or_default(),
+            input.points,
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(engine.project().clone())
+}
+
+#[instrument(skip(state))]
+#[tauri::command]
+fn get_automation_parameter_ids(state: State<'_, AppState>) -> Vec<String> {
+    state.engine.lock().automation_parameter_ids()
 }
 
 #[instrument(skip(state, input))]
@@ -398,6 +560,22 @@ fn update_clip_notes(
     let mut engine = state.engine.lock();
     engine
         .upsert_clip_notes(track_id, clip_id, input.notes)
+        .map_err(|error| error.to_string())?;
+
+    Ok(engine.project().clone())
+}
+
+#[instrument(skip(state, input))]
+#[tauri::command]
+fn update_automation_clip(
+    state: State<'_, AppState>,
+    input: UpdateAutomationClipInput,
+) -> Result<Project, String> {
+    let track_id = parse_uuid(&input.track_id)?;
+    let clip_id = parse_uuid(&input.clip_id)?;
+    let mut engine = state.engine.lock();
+    engine
+        .upsert_automation_clip(track_id, clip_id, input.target_parameter_id, input.points)
         .map_err(|error| error.to_string())?;
 
     Ok(engine.project().clone())
@@ -594,6 +772,57 @@ fn autosave_project(state: State<'_, AppState>, autosave_dir: String) -> Result<
 
 #[instrument(skip(state))]
 #[tauri::command]
+fn get_autosave_status(state: State<'_, AppState>) -> Result<AutosaveStatusOutput, String> {
+    let autosave_dir = match state.config.mode {
+        AppMode::Dev => resolve_dev_path(&state.config.paths.dev_autosave_dir),
+        AppMode::Prod => PathBuf::from("autosave"),
+    };
+    if !autosave_dir.is_dir() {
+        return Ok(AutosaveStatusOutput {
+            exists: false,
+            path: None,
+            modified_epoch_ms: None,
+        });
+    }
+
+    let mut latest_path: Option<PathBuf> = None;
+    let mut latest_modified_epoch_ms: Option<i64> = None;
+    let entries = fs::read_dir(&autosave_dir).map_err(|error| {
+        format!(
+            "failed to read autosave dir {}: {error}",
+            autosave_dir.display()
+        )
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        if !name.ends_with(".autosave.voltlane.json") {
+            continue;
+        }
+        let metadata = fs::metadata(&path).map_err(|error| error.to_string())?;
+        let modified = metadata.modified().map_err(|error| error.to_string())?;
+        let epoch_ms = modified
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|error| error.to_string())?
+            .as_millis() as i64;
+        if latest_modified_epoch_ms.is_none_or(|candidate| epoch_ms > candidate) {
+            latest_modified_epoch_ms = Some(epoch_ms);
+            latest_path = Some(path);
+        }
+    }
+
+    Ok(AutosaveStatusOutput {
+        exists: latest_path.is_some(),
+        path: latest_path.map(|path| path.display().to_string()),
+        modified_epoch_ms: latest_modified_epoch_ms,
+    })
+}
+
+#[instrument(skip(state))]
+#[tauri::command]
 fn measure_parity(state: State<'_, AppState>) -> Result<ParityReport, String> {
     let engine = state.engine.lock();
     voltlane_core::generate_parity_report(engine.project()).map_err(|error| error.to_string())
@@ -733,14 +962,20 @@ pub fn run() {
             create_project,
             add_track,
             patch_track_state,
+            patch_track_mix,
+            upsert_track_send,
+            remove_track_send,
             reorder_track,
             add_midi_clip,
+            add_automation_clip,
+            get_automation_parameter_ids,
             scan_audio_assets,
             analyze_audio_asset,
             import_audio_clip,
             update_audio_clip,
             move_clip,
             update_clip_notes,
+            update_automation_clip,
             update_pattern_rows,
             update_pattern_macros,
             add_clip_note,
@@ -754,6 +989,7 @@ pub fn run() {
             save_project,
             load_project,
             autosave_project,
+            get_autosave_status,
             measure_parity
         ])
         .run(tauri::generate_context!())

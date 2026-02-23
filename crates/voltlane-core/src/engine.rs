@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+    collections::{BTreeMap, HashMap, HashSet},
+    path::{Path, PathBuf},
+};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -12,8 +15,9 @@ use crate::{
     },
     export,
     model::{
-        AudioClip, ChipMacroLane, Clip, ClipPayload, DEFAULT_SAMPLE_RATE, EffectSpec, MidiNote,
-        PatternClip, Project, Track, TrackKind, TrackerRow,
+        AudioClip, AutomationClip, AutomationPoint, ChipMacroLane, Clip, ClipPayload,
+        DEFAULT_SAMPLE_RATE, EffectSpec, MidiNote, PatternClip, Project, Track, TrackKind,
+        TrackSend, TrackerRow,
     },
     persistence,
     time::{seconds_to_ticks, tracker_rows_to_ticks},
@@ -31,8 +35,18 @@ pub enum EngineError {
     UnsupportedClipPayload(Uuid),
     #[error("clip is not an audio clip: {0}")]
     UnsupportedAudioClip(Uuid),
+    #[error("clip is not an automation clip: {0}")]
+    UnsupportedAutomationClip(Uuid),
     #[error("clip is not a pattern clip: {0}")]
     UnsupportedPatternClip(Uuid),
+    #[error("track {track_id} has invalid bus target: {target_bus}")]
+    InvalidBusTarget { track_id: Uuid, target_bus: Uuid },
+    #[error("track {track_id} has invalid send target: {target_bus}")]
+    InvalidTrackSend { track_id: Uuid, target_bus: Uuid },
+    #[error("track send not found: {0}")]
+    SendNotFound(Uuid),
+    #[error("routing graph contains a cycle")]
+    RoutingCycleDetected,
     #[error("invalid quantize grid ticks: {0}")]
     InvalidQuantizeGrid(u64),
     #[error("invalid tracker lines_per_beat: {0}")]
@@ -104,6 +118,13 @@ pub struct AudioClipPatch {
     pub fade_out_seconds: Option<f64>,
     pub reverse: Option<bool>,
     pub stretch_ratio: Option<f32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TrackMixPatch {
+    pub gain_db: Option<f32>,
+    pub pan: Option<f32>,
+    pub output_bus: Option<Option<Uuid>>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -245,8 +266,9 @@ impl Engine {
     pub fn add_effect(
         &mut self,
         track_id: Uuid,
-        effect: EffectSpec,
+        mut effect: EffectSpec,
     ) -> Result<EffectSpec, EngineError> {
+        populate_builtin_effect_defaults(&mut effect);
         let track = self
             .project
             .tracks
@@ -258,6 +280,206 @@ impl Engine {
         self.project.touch();
         info!(effect_id = %effect.id, "effect added to track");
         Ok(effect)
+    }
+
+    #[must_use]
+    pub fn automation_parameter_ids(&self) -> Vec<String> {
+        let mut ids = Vec::new();
+        for track in &self.project.tracks {
+            ids.push(format!("track:{}:gain_db", track.id));
+            ids.push(format!("track:{}:pan", track.id));
+            for effect in &track.effects {
+                for key in effect.params.keys() {
+                    ids.push(format!("track:{}:effect:{}:{}", track.id, effect.id, key));
+                }
+            }
+        }
+        ids.sort();
+        ids.dedup();
+        ids
+    }
+
+    #[instrument(skip(self, patch), fields(project_id = %self.project.id, track_id = %track_id))]
+    pub fn patch_track_mix(
+        &mut self,
+        track_id: Uuid,
+        patch: TrackMixPatch,
+    ) -> Result<Track, EngineError> {
+        let mut candidate_tracks = self.project.tracks.clone();
+        if let Some(Some(target_bus)) = patch.output_bus {
+            validate_bus_target(&candidate_tracks, track_id, target_bus)?;
+        }
+        let track = candidate_tracks
+            .iter_mut()
+            .find(|track| track.id == track_id)
+            .ok_or(EngineError::TrackNotFound(track_id))?;
+
+        if let Some(gain_db) = patch.gain_db {
+            track.gain_db = gain_db.clamp(-96.0, 12.0);
+        }
+        if let Some(pan) = patch.pan {
+            track.pan = pan.clamp(-1.0, 1.0);
+        }
+        if let Some(output_bus) = patch.output_bus {
+            track.output_bus = output_bus;
+        }
+
+        validate_routing_graph(&candidate_tracks)?;
+        self.project.tracks = candidate_tracks;
+        self.project.touch();
+
+        let updated = self
+            .project
+            .tracks
+            .iter()
+            .find(|track| track.id == track_id)
+            .ok_or(EngineError::TrackNotFound(track_id))?
+            .clone();
+        info!(
+            gain_db = updated.gain_db,
+            pan = updated.pan,
+            output_bus = ?updated.output_bus,
+            "track mix patched"
+        );
+        Ok(updated)
+    }
+
+    #[instrument(skip(self, send), fields(project_id = %self.project.id, track_id = %track_id, send_id = %send.id))]
+    pub fn upsert_track_send(
+        &mut self,
+        track_id: Uuid,
+        mut send: TrackSend,
+    ) -> Result<Track, EngineError> {
+        let mut candidate_tracks = self.project.tracks.clone();
+        sanitize_track_send(&mut send);
+        validate_bus_target(&candidate_tracks, track_id, send.target_bus)?;
+
+        let track = candidate_tracks
+            .iter_mut()
+            .find(|track| track.id == track_id)
+            .ok_or(EngineError::TrackNotFound(track_id))?;
+
+        if let Some(existing) = track
+            .sends
+            .iter_mut()
+            .find(|existing| existing.id == send.id)
+        {
+            *existing = send.clone();
+        } else {
+            track.sends.push(send);
+        }
+
+        validate_routing_graph(&candidate_tracks)?;
+        self.project.tracks = candidate_tracks;
+        self.project.touch();
+
+        let updated = self
+            .project
+            .tracks
+            .iter()
+            .find(|track| track.id == track_id)
+            .ok_or(EngineError::TrackNotFound(track_id))?
+            .clone();
+        info!(send_count = updated.sends.len(), "track send upserted");
+        Ok(updated)
+    }
+
+    #[instrument(skip(self), fields(project_id = %self.project.id, track_id = %track_id, send_id = %send_id))]
+    pub fn remove_track_send(
+        &mut self,
+        track_id: Uuid,
+        send_id: Uuid,
+    ) -> Result<Track, EngineError> {
+        let mut candidate_tracks = self.project.tracks.clone();
+        let track = candidate_tracks
+            .iter_mut()
+            .find(|track| track.id == track_id)
+            .ok_or(EngineError::TrackNotFound(track_id))?;
+
+        let before = track.sends.len();
+        track.sends.retain(|send| send.id != send_id);
+        if track.sends.len() == before {
+            return Err(EngineError::SendNotFound(send_id));
+        }
+
+        validate_routing_graph(&candidate_tracks)?;
+        self.project.tracks = candidate_tracks;
+        self.project.touch();
+
+        let updated = self
+            .project
+            .tracks
+            .iter()
+            .find(|track| track.id == track_id)
+            .ok_or(EngineError::TrackNotFound(track_id))?
+            .clone();
+        info!(send_count = updated.sends.len(), "track send removed");
+        Ok(updated)
+    }
+
+    #[instrument(skip(self, points), fields(project_id = %self.project.id, track_id = %track_id, clip_name = %name, points = points.len()))]
+    pub fn add_automation_clip(
+        &mut self,
+        track_id: Uuid,
+        name: String,
+        start_tick: u64,
+        length_ticks: u64,
+        target_parameter_id: String,
+        mut points: Vec<AutomationPoint>,
+    ) -> Result<Clip, EngineError> {
+        sanitize_automation_points(&mut points);
+        let target_parameter_id = sanitize_automation_target_id(target_parameter_id, track_id);
+
+        let track = self
+            .project
+            .tracks
+            .iter_mut()
+            .find(|track| track.id == track_id)
+            .ok_or(EngineError::TrackNotFound(track_id))?;
+
+        let clip = Clip {
+            id: Uuid::new_v4(),
+            name,
+            start_tick,
+            length_ticks: length_ticks.max(1),
+            disabled: false,
+            payload: ClipPayload::Automation(AutomationClip {
+                target_parameter_id,
+                points,
+            }),
+        };
+
+        track.clips.push(clip.clone());
+        self.project.touch();
+        info!(clip_id = %clip.id, "automation clip added");
+        Ok(clip)
+    }
+
+    #[instrument(skip(self, points), fields(project_id = %self.project.id, track_id = %track_id, clip_id = %clip_id, points = points.len()))]
+    pub fn upsert_automation_clip(
+        &mut self,
+        track_id: Uuid,
+        clip_id: Uuid,
+        target_parameter_id: Option<String>,
+        mut points: Vec<AutomationPoint>,
+    ) -> Result<Clip, EngineError> {
+        sanitize_automation_points(&mut points);
+        let updated_clip = {
+            let clip = self.find_clip_mut(track_id, clip_id)?;
+            let automation =
+                clip_automation_mut(clip).ok_or(EngineError::UnsupportedAutomationClip(clip_id))?;
+
+            if let Some(target_parameter_id) = target_parameter_id {
+                automation.target_parameter_id =
+                    sanitize_automation_target_id(target_parameter_id, track_id);
+            }
+            automation.points = points;
+            clip.clone()
+        };
+
+        self.project.touch();
+        info!("automation clip updated");
+        Ok(updated_clip)
     }
 
     #[instrument(skip(self, request), fields(project_id = %self.project.id, track_id = %request.track_id, clip_name = %request.name))]
@@ -776,6 +998,13 @@ fn clip_pattern_mut(clip: &mut Clip) -> Option<&mut PatternClip> {
     }
 }
 
+fn clip_automation_mut(clip: &mut Clip) -> Option<&mut AutomationClip> {
+    match &mut clip.payload {
+        ClipPayload::Automation(automation) => Some(automation),
+        ClipPayload::Midi(_) | ClipPayload::Audio(_) | ClipPayload::Pattern(_) => None,
+    }
+}
+
 fn sanitize_note(note: &mut MidiNote) {
     note.pitch = note.pitch.min(127);
     note.velocity = note.velocity.min(127);
@@ -813,6 +1042,28 @@ fn sanitize_chip_macro_lane(lane: &mut ChipMacroLane) {
             lane.loop_start = None;
             lane.loop_end = None;
         }
+    }
+}
+
+fn sanitize_track_send(send: &mut TrackSend) {
+    if send.id.is_nil() {
+        send.id = Uuid::new_v4();
+    }
+    send.level_db = send.level_db.clamp(-96.0, 12.0);
+    send.pan = send.pan.clamp(-1.0, 1.0);
+}
+
+fn sanitize_automation_points(points: &mut Vec<AutomationPoint>) {
+    points.retain(|point| point.value.is_finite());
+    points.sort_by_key(|point| point.tick);
+}
+
+fn sanitize_automation_target_id(target_parameter_id: String, track_id: Uuid) -> String {
+    let trimmed = target_parameter_id.trim();
+    if trimmed.is_empty() {
+        format!("track:{track_id}:gain_db")
+    } else {
+        trimmed.to_string()
     }
 }
 
@@ -943,6 +1194,146 @@ fn sanitize_audio_clip(audio: &mut AudioClip) -> Result<(), EngineError> {
     }
 
     Ok(())
+}
+
+fn validate_bus_target(
+    tracks: &[Track],
+    track_id: Uuid,
+    target_bus: Uuid,
+) -> Result<(), EngineError> {
+    if track_id == target_bus {
+        return Err(EngineError::InvalidBusTarget {
+            track_id,
+            target_bus,
+        });
+    }
+
+    let bus = tracks.iter().find(|track| track.id == target_bus).ok_or(
+        EngineError::InvalidBusTarget {
+            track_id,
+            target_bus,
+        },
+    )?;
+    if !matches!(bus.kind, TrackKind::Bus) {
+        return Err(EngineError::InvalidBusTarget {
+            track_id,
+            target_bus,
+        });
+    }
+    Ok(())
+}
+
+fn validate_routing_graph(tracks: &[Track]) -> Result<(), EngineError> {
+    for track in tracks {
+        if let Some(output_bus) = track.output_bus {
+            validate_bus_target(tracks, track.id, output_bus)?;
+        }
+        for send in &track.sends {
+            if send.enabled {
+                validate_bus_target(tracks, track.id, send.target_bus).map_err(|_| {
+                    EngineError::InvalidTrackSend {
+                        track_id: track.id,
+                        target_bus: send.target_bus,
+                    }
+                })?;
+            }
+        }
+    }
+
+    let mut adjacency: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
+    for track in tracks {
+        let edges = adjacency.entry(track.id).or_default();
+        if let Some(output_bus) = track.output_bus {
+            edges.push(output_bus);
+        }
+        for send in &track.sends {
+            if send.enabled {
+                edges.push(send.target_bus);
+            }
+        }
+    }
+
+    let mut visiting = HashSet::new();
+    let mut visited = HashSet::new();
+    for track in tracks {
+        if detect_cycle(track.id, &adjacency, &mut visiting, &mut visited) {
+            return Err(EngineError::RoutingCycleDetected);
+        }
+    }
+    Ok(())
+}
+
+fn detect_cycle(
+    node: Uuid,
+    adjacency: &HashMap<Uuid, Vec<Uuid>>,
+    visiting: &mut HashSet<Uuid>,
+    visited: &mut HashSet<Uuid>,
+) -> bool {
+    if visited.contains(&node) {
+        return false;
+    }
+    if !visiting.insert(node) {
+        return true;
+    }
+
+    if let Some(neighbors) = adjacency.get(&node) {
+        for neighbor in neighbors {
+            if detect_cycle(*neighbor, adjacency, visiting, visited) {
+                return true;
+            }
+        }
+    }
+
+    visiting.remove(&node);
+    visited.insert(node);
+    false
+}
+
+fn populate_builtin_effect_defaults(effect: &mut EffectSpec) {
+    if !effect.params.is_empty() {
+        return;
+    }
+
+    let mut params = BTreeMap::new();
+    match effect.name.trim().to_ascii_lowercase().as_str() {
+        "eq" => {
+            params.insert("low_gain_db".to_string(), 0.0);
+            params.insert("mid_gain_db".to_string(), 0.0);
+            params.insert("high_gain_db".to_string(), 0.0);
+            params.insert("low_freq_hz".to_string(), 120.0);
+            params.insert("high_freq_hz".to_string(), 8_000.0);
+        }
+        "comp" | "compressor" => {
+            params.insert("threshold_db".to_string(), -18.0);
+            params.insert("ratio".to_string(), 4.0);
+            params.insert("attack_ms".to_string(), 10.0);
+            params.insert("release_ms".to_string(), 120.0);
+            params.insert("makeup_db".to_string(), 0.0);
+        }
+        "reverb" => {
+            params.insert("mix".to_string(), 0.18);
+            params.insert("room_size".to_string(), 0.62);
+            params.insert("damping".to_string(), 0.45);
+            params.insert("width".to_string(), 0.85);
+        }
+        "delay" => {
+            params.insert("mix".to_string(), 0.25);
+            params.insert("time_ms".to_string(), 320.0);
+            params.insert("feedback".to_string(), 0.38);
+            params.insert("hi_cut_hz".to_string(), 6_500.0);
+        }
+        "limiter" => {
+            params.insert("ceiling_db".to_string(), -0.8);
+            params.insert("release_ms".to_string(), 80.0);
+        }
+        "bitcrusher" => {
+            params.insert("bits".to_string(), 8.0);
+            params.insert("downsample".to_string(), 2.0);
+        }
+        _ => {}
+    }
+
+    effect.params = params;
 }
 
 fn round_to_grid(value: u64, grid: u64) -> u64 {

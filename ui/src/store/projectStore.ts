@@ -1,6 +1,7 @@
 import { create } from "zustand";
 
 import {
+  addAutomationClip,
   addClipNote,
   addEffect,
   addMidiClip,
@@ -9,34 +10,43 @@ import {
   autosaveProject,
   createProject,
   exportProject,
+  getAutomationParameterIds,
+  getAutosaveStatus,
   getProject,
   importAudioClip,
   loadProject,
   measureParity,
   moveClip,
+  patchTrackMix,
   patchTrackState,
   quantizeClipNotes,
   reorderTrack,
   removeClipNote,
+  removeTrackSend,
   scanAudioAssets,
   saveProject,
   setLoopRegion,
   setPlayback,
   transposeClipNotes,
+  updateAutomationClip,
   updateAudioClip,
   updatePatternMacros,
   updatePatternRows,
+  upsertTrackSend,
   updateClipNotes
 } from "../api/tauri";
 import { logger } from "../lib/logger";
 import type {
   AudioAnalysis,
   AudioAssetEntry,
+  AutomationPoint,
   ChipMacroLane,
   ExportKind,
   RenderMode,
   MidiNote,
   ParityReport,
+  TrackSendInput,
+  PatchTrackMixInput,
   Project,
   TrackerRow,
   TrackKind
@@ -58,6 +68,9 @@ interface ProjectStore {
   error: string | null;
   outputRoot: string;
   exportRenderMode: RenderMode;
+  automationParameterIds: string[];
+  autosaveRecoveryPath: string | null;
+  autosaveRecoveryModifiedEpochMs: number | null;
   selectedTrackId: string | null;
   selectedClipId: string | null;
   audioAssets: AudioAssetEntry[];
@@ -71,8 +84,18 @@ interface ProjectStore {
     trackId: string,
     patch: { hidden?: boolean; mute?: boolean; enabled?: boolean }
   ) => Promise<void>;
+  setTrackMix: (
+    trackId: string,
+    patch: { gain_db?: number; pan?: number; output_bus_id?: string | null }
+  ) => Promise<void>;
   addQuickClip: (trackId: string, kind: TrackKind) => Promise<void>;
+  addAutomationLaneClip: (
+    trackId: string,
+    targetParameterId?: string
+  ) => Promise<void>;
   addBasicEffect: (trackId: string, effectName: string) => Promise<void>;
+  saveTrackSend: (trackId: string, send: TrackSendInput) => Promise<void>;
+  deleteTrackSend: (trackId: string, sendId: string) => Promise<void>;
   shiftTrack: (index: number, direction: "up" | "down") => Promise<void>;
   setPlaybackState: (isPlaying: boolean) => Promise<void>;
   configureLoop: (enabled: boolean, loopStartTick?: number, loopEndTick?: number) => Promise<void>;
@@ -95,6 +118,12 @@ interface ProjectStore {
     trackId: string,
     clipId: string,
     macros: ChipMacroLane[]
+  ) => Promise<void>;
+  replaceAutomationClip: (
+    trackId: string,
+    clipId: string,
+    targetParameterId: string | undefined,
+    points: AutomationPoint[]
   ) => Promise<void>;
   transposeClip: (trackId: string, clipId: string, semitones: number) => Promise<void>;
   quantizeClip: (trackId: string, clipId: string, gridTicks: number) => Promise<void>;
@@ -120,6 +149,9 @@ interface ProjectStore {
   saveCurrentProject: () => Promise<void>;
   loadCurrentProject: () => Promise<void>;
   runAutosave: () => Promise<void>;
+  reloadAutomationTargets: () => Promise<void>;
+  restoreAutosave: () => Promise<void>;
+  dismissAutosaveRecovery: () => void;
   refreshParity: () => Promise<void>;
   clearError: () => void;
   setSelectedTrack: (trackId: string | null) => void;
@@ -181,6 +213,9 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   error: null,
   outputRoot: "data/exports",
   exportRenderMode: "offline",
+  automationParameterIds: [],
+  autosaveRecoveryPath: null,
+  autosaveRecoveryModifiedEpochMs: null,
   selectedTrackId: null,
   selectedClipId: null,
   audioAssets: [],
@@ -192,8 +227,17 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     await withErrorHandling(set, async () => {
       logger.info("loading initial project");
       const project = await getProject();
+      const [automationParameterIds, autosaveStatus] = await Promise.all([
+        getAutomationParameterIds(),
+        getAutosaveStatus()
+      ]);
       set({
         project,
+        automationParameterIds,
+        autosaveRecoveryPath: autosaveStatus.exists ? autosaveStatus.path : null,
+        autosaveRecoveryModifiedEpochMs: autosaveStatus.exists
+          ? autosaveStatus.modified_epoch_ms
+          : null,
         selectedTrackId: project.tracks[0]?.id ?? null,
         selectedClipId: project.tracks[0]?.clips[0]?.id ?? null
       });
@@ -205,8 +249,10 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   createNewProject: async (title) => {
     await withErrorHandling(set, async () => {
       const project = await createProject({ title, bpm: 140, sample_rate: 48_000 });
+      const automationParameterIds = await getAutomationParameterIds();
       set({
         project,
+        automationParameterIds,
         selectedTrackId: project.tracks[0]?.id ?? null,
         selectedClipId: project.tracks[0]?.clips[0]?.id ?? null
       });
@@ -222,7 +268,12 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         color: nextTrackColor(project),
         kind
       });
-      set({ project: updated, selectedTrackId: updated.tracks[updated.tracks.length - 1]?.id ?? null });
+      const automationParameterIds = await getAutomationParameterIds();
+      set({
+        project: updated,
+        automationParameterIds,
+        selectedTrackId: updated.tracks[updated.tracks.length - 1]?.id ?? null
+      });
       await get().refreshParity();
     });
   },
@@ -234,10 +285,54 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     });
   },
 
+  setTrackMix: async (trackId, patch) => {
+    await withErrorHandling(set, async () => {
+      const input: PatchTrackMixInput = {
+        track_id: trackId
+      };
+      if (typeof patch.gain_db === "number") {
+        input.gain_db = patch.gain_db;
+      }
+      if (typeof patch.pan === "number") {
+        input.pan = patch.pan;
+      }
+      if (patch.output_bus_id === null) {
+        input.clear_output_bus = true;
+      } else if (typeof patch.output_bus_id === "string") {
+        input.output_bus_id = patch.output_bus_id;
+      }
+
+      const updated = await patchTrackMix(input);
+      set({ project: updated });
+    });
+  },
+
   addQuickClip: async (trackId, kind) => {
     await withErrorHandling(set, async () => {
       if (kind === "audio") {
         throw new Error("Use Audio Browser to import audio clips into audio tracks.");
+      }
+      if (kind === "bus") {
+        throw new Error("Bus tracks are routing destinations and do not host clips.");
+      }
+      if (kind === "automation") {
+        const updated = await addAutomationClip({
+          track_id: trackId,
+          name: "Automation Clip",
+          start_tick: 0,
+          length_ticks: 1_920,
+          target_parameter_id: get().automationParameterIds[0],
+          points: [
+            { tick: 0, value: 1 },
+            { tick: 960, value: 0.5 },
+            { tick: 1_920, value: 1 }
+          ]
+        });
+        const targetTrack = updated.tracks.find((candidate) => candidate.id === trackId);
+        const selectedClipId = targetTrack?.clips[targetTrack.clips.length - 1]?.id ?? null;
+        set({ project: updated, selectedTrackId: trackId, selectedClipId });
+        await get().refreshParity();
+        return;
       }
       const isChip = kind === "chip";
       const updated = await addMidiClip({
@@ -261,9 +356,51 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     });
   },
 
+  addAutomationLaneClip: async (trackId, targetParameterId) => {
+    await withErrorHandling(set, async () => {
+      const updated = await addAutomationClip({
+        track_id: trackId,
+        name: "Automation Clip",
+        start_tick: 0,
+        length_ticks: 1_920,
+        target_parameter_id: targetParameterId ?? get().automationParameterIds[0],
+        points: [
+          { tick: 0, value: 1 },
+          { tick: 960, value: 0.7 },
+          { tick: 1_920, value: 1 }
+        ]
+      });
+      const targetTrack = updated.tracks.find((candidate) => candidate.id === trackId);
+      const selectedClipId = targetTrack?.clips[targetTrack.clips.length - 1]?.id ?? null;
+      set({ project: updated, selectedTrackId: trackId, selectedClipId });
+      await get().refreshParity();
+    });
+  },
+
   addBasicEffect: async (trackId, effectName) => {
     await withErrorHandling(set, async () => {
       const updated = await addEffect({ track_id: trackId, effect_name: effectName });
+      set({ project: updated });
+      await get().reloadAutomationTargets();
+    });
+  },
+
+  saveTrackSend: async (trackId, send) => {
+    await withErrorHandling(set, async () => {
+      const updated = await upsertTrackSend({
+        track_id: trackId,
+        send
+      });
+      set({ project: updated });
+    });
+  },
+
+  deleteTrackSend: async (trackId, sendId) => {
+    await withErrorHandling(set, async () => {
+      const updated = await removeTrackSend({
+        track_id: trackId,
+        send_id: sendId
+      });
       set({ project: updated });
     });
   },
@@ -372,6 +509,19 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         track_id: trackId,
         clip_id: clipId,
         macros
+      });
+      set({ project: updated, selectedTrackId: trackId, selectedClipId: clipId });
+      await get().refreshParity();
+    });
+  },
+
+  replaceAutomationClip: async (trackId, clipId, targetParameterId, points) => {
+    await withErrorHandling(set, async () => {
+      const updated = await updateAutomationClip({
+        track_id: trackId,
+        clip_id: clipId,
+        target_parameter_id: targetParameterId,
+        points
       });
       set({ project: updated, selectedTrackId: trackId, selectedClipId: clipId });
       await get().refreshParity();
@@ -528,8 +678,10 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       const title = project?.title.replace(/\s+/g, "_").toLowerCase() ?? "voltlane_mock";
       const path = `${get().outputRoot}/${title}.voltlane.json`;
       const updated = await loadProject(path);
+      const automationParameterIds = await getAutomationParameterIds();
       set({
         project: updated,
+        automationParameterIds,
         selectedTrackId: updated.tracks[0]?.id ?? null,
         selectedClipId: updated.tracks[0]?.clips[0]?.id ?? null
       });
@@ -540,9 +692,45 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   runAutosave: async () => {
     await withErrorHandling(set, async () => {
       await autosaveProject("data/autosave");
+      const autosaveStatus = await getAutosaveStatus();
+      set({
+        autosaveRecoveryPath: autosaveStatus.exists ? autosaveStatus.path : null,
+        autosaveRecoveryModifiedEpochMs: autosaveStatus.exists
+          ? autosaveStatus.modified_epoch_ms
+          : null
+      });
       logger.info("autosave completed");
     });
   },
+
+  reloadAutomationTargets: async () => {
+    await withErrorHandling(set, async () => {
+      const automationParameterIds = await getAutomationParameterIds();
+      set({ automationParameterIds });
+    });
+  },
+
+  restoreAutosave: async () => {
+    await withErrorHandling(set, async () => {
+      const autosavePath = get().autosaveRecoveryPath;
+      if (!autosavePath) {
+        return;
+      }
+      const updated = await loadProject(autosavePath);
+      set({
+        project: updated,
+        selectedTrackId: updated.tracks[0]?.id ?? null,
+        selectedClipId: updated.tracks[0]?.clips[0]?.id ?? null,
+        autosaveRecoveryPath: null,
+        autosaveRecoveryModifiedEpochMs: null
+      });
+      await get().refreshParity();
+      await get().reloadAutomationTargets();
+    });
+  },
+
+  dismissAutosaveRecovery: () =>
+    set({ autosaveRecoveryPath: null, autosaveRecoveryModifiedEpochMs: null }),
 
   refreshParity: async () => {
     try {

@@ -28,9 +28,14 @@ The current implementation now spans Milestone A/B plus core audio-clip workflow
 - Tauri commands for all major operations (`project/track/clip/export/parity`).
 - React UI for playlist lanes, track controls, transport, and parity panel.
 - Clip editor panel for MIDI/pattern note editing (add/remove/update notes, quantize, transpose).
+- Interactive piano roll editing for MIDI clips (drag + resize + snap).
 - Tracker grid editor for chip pattern clips (row/effect editing with pattern-note regeneration).
 - Chip macro editor lanes for pattern clips (`arpeggio`, `env`, `duty`) with loop metadata.
+- Source-chip-aware backend rendering pipeline (`gameboy_apu`, `nes/2a03`, `sn76489/psg`, generic fallback).
+- Built-in insert FX DSP in the core renderer (`eq`, `compressor`, `reverb`, `delay`, `limiter`, `bitcrusher`).
 - Export render-mode selection (`offline` or `realtime`) from UI through Rust core.
+- Automation clip editing with parameter-ID targeting and point tables.
+- Mixer routing controls: track gain/pan, bus output assignment, and send lanes.
 - Audio browser panel for asset indexing, waveform preview metadata, and direct import into audio tracks.
 - Deterministic parity harness:
   - golden baseline test
@@ -126,6 +131,11 @@ when `WAYLAND_DISPLAY` is present.
 - Tauri plugin log forwards logs to stdout, log dir, and webview stream.
 - Log filtering and sink behavior are configured in `voltlane.config.toml`.
 
+## Crash Recovery
+
+- On startup, Voltlane checks for the latest autosave file in the configured autosave directory.
+- If an autosave is found, the UI shows a restore prompt with timestamp and supports one-click restore.
+
 ## Parity Harness
 
 ### Golden parity test
@@ -182,4 +192,4 @@ UPDATE_PARITY_BASELINE=1 cargo test -p voltlane-core parity_report_matches_golde
 
 ## Status
 
-This is a production-style foundation, not a finished DAW. See `ROADMAP.md` for checked progress and next milestones.
+This is still a prototype, but the current roadmap phases are now checked end-to-end in code and tests.

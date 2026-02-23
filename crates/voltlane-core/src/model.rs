@@ -7,6 +7,8 @@ use uuid::Uuid;
 pub const DEFAULT_PPQ: u16 = 480;
 pub const DEFAULT_SAMPLE_RATE: u32 = 48_000;
 pub const DEFAULT_TRACKER_LINES_PER_BEAT: u16 = 4;
+pub const DEFAULT_TRACK_GAIN_DB: f32 = 0.0;
+pub const DEFAULT_TRACK_PAN: f32 = 0.0;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Project {
@@ -102,6 +104,20 @@ pub struct Track {
     pub mute: bool,
     pub solo: bool,
     pub enabled: bool,
+    #[serde(
+        default = "default_track_gain_db",
+        skip_serializing_if = "is_default_track_gain_db"
+    )]
+    pub gain_db: f32,
+    #[serde(
+        default = "default_track_pan",
+        skip_serializing_if = "is_default_track_pan"
+    )]
+    pub pan: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_bus: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sends: Vec<TrackSend>,
     pub effects: Vec<EffectSpec>,
     pub clips: Vec<Clip>,
 }
@@ -118,8 +134,46 @@ impl Track {
             mute: false,
             solo: false,
             enabled: true,
+            gain_db: default_track_gain_db(),
+            pan: default_track_pan(),
+            output_bus: None,
+            sends: Vec::new(),
             effects: Vec::new(),
             clips: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct TrackSend {
+    pub id: Uuid,
+    pub target_bus: Uuid,
+    pub level_db: f32,
+    pub pan: f32,
+    pub pre_fader: bool,
+    pub enabled: bool,
+}
+
+impl Default for TrackSend {
+    fn default() -> Self {
+        Self {
+            id: Uuid::new_v4(),
+            target_bus: Uuid::nil(),
+            level_db: 0.0,
+            pan: 0.0,
+            pre_fader: false,
+            enabled: true,
+        }
+    }
+}
+
+impl TrackSend {
+    #[must_use]
+    pub fn new(target_bus: Uuid) -> Self {
+        Self {
+            target_bus,
+            ..Self::default()
         }
     }
 }
@@ -358,6 +412,22 @@ impl MidiNote {
 
 const fn default_tracker_lines_per_beat() -> u16 {
     DEFAULT_TRACKER_LINES_PER_BEAT
+}
+
+const fn default_track_gain_db() -> f32 {
+    DEFAULT_TRACK_GAIN_DB
+}
+
+const fn default_track_pan() -> f32 {
+    DEFAULT_TRACK_PAN
+}
+
+fn is_default_track_gain_db(value: &f32) -> bool {
+    (*value - DEFAULT_TRACK_GAIN_DB).abs() <= f32::EPSILON
+}
+
+fn is_default_track_pan(value: &f32) -> bool {
+    (*value - DEFAULT_TRACK_PAN).abs() <= f32::EPSILON
 }
 
 const fn is_default_tracker_lines_per_beat(value: &u16) -> bool {

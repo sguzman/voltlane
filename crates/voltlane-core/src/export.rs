@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     fs,
     path::{Path, PathBuf},
     process::Command,
@@ -11,27 +11,51 @@ use midly::{
     num::{u4, u7, u15, u24, u28},
 };
 use tracing::{debug, info, instrument, warn};
+use uuid::Uuid;
 
 use crate::{
-    assets::decode_audio_file_mono,
+    assets::{DecodedAudio, decode_audio_file_mono},
     engine::RenderMode,
-    model::{AudioClip, ChipMacroLane, ClipPayload, MidiNote, PatternClip, Project, TrackKind},
+    model::{
+        AudioClip, ChipMacroLane, ClipPayload, EffectSpec, MidiNote, PatternClip, Project, Track,
+        TrackKind,
+    },
     time::ticks_to_samples,
 };
 
 #[derive(Debug, Clone)]
-struct RenderedNote {
+struct SynthEvent {
     start_sample: usize,
     end_sample: usize,
     amplitude: f32,
     phase_increment: u32,
+    attack_frames: usize,
+    release_frames: usize,
     waveform: Waveform,
+    color: VoiceColor,
 }
 
 #[derive(Debug, Clone, Copy)]
 enum Waveform {
     Triangle,
-    Square,
+    Pulse { duty_cycle: f32 },
+    Noise { seed: u32 },
+}
+
+#[derive(Debug, Clone, Copy)]
+enum VoiceColor {
+    Clean,
+    GameBoyApu,
+    NesApu,
+    Sn76489,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ChipBackend {
+    GameBoyApu,
+    NesApu,
+    Sn76489,
+    Generic,
 }
 
 #[derive(Debug, Clone)]
@@ -39,6 +63,14 @@ struct AbsoluteMidiEvent {
     tick: u64,
     order: u8,
     kind: TrackEventKind<'static>,
+}
+
+#[derive(Debug, Default)]
+struct RenderStats {
+    rendered_notes: usize,
+    rendered_audio_clips: usize,
+    routed_tracks: usize,
+    processed_effect_instances: usize,
 }
 
 #[instrument(skip(project), fields(project_id = %project.id))]
@@ -52,34 +84,84 @@ pub fn render_project_samples(project: &Project, tail_seconds: f64) -> Vec<f32> 
         .max(u64::from(sample_rate));
     let frame_count = usize::try_from(total_frames).unwrap_or(sample_rate as usize);
 
-    let mut buffer = vec![0.0_f32; frame_count];
-    let rendered_audio_clips = mix_audio_clips(project, &mut buffer);
+    let mut stats = RenderStats::default();
+    let track_sources = render_track_source_buffers(project, frame_count, &mut stats);
+    let track_order = track_topological_order(project);
+    let mut master = vec![0.0_f32; frame_count];
+    let mut pending_bus_input: HashMap<Uuid, Vec<f32>> = HashMap::new();
 
-    let mut notes = collect_rendered_notes(project);
-    for note in &mut notes {
-        let mut phase = 0_u32;
-        let end = note.end_sample.min(frame_count);
-        for frame in &mut buffer[note.start_sample.min(frame_count)..end] {
-            let osc = match note.waveform {
-                Waveform::Triangle => triangle_osc(phase),
-                Waveform::Square => square_osc(phase),
-            };
-            *frame += osc * note.amplitude;
-            phase = phase.wrapping_add(note.phase_increment);
+    for track_id in track_order {
+        let Some(track) = project
+            .tracks
+            .iter()
+            .find(|candidate| candidate.id == track_id)
+        else {
+            continue;
+        };
+        if !track.enabled || track.mute || track.hidden {
+            continue;
         }
+
+        let mut working = vec![0.0_f32; frame_count];
+        if let Some(source) = track_sources.get(&track.id) {
+            add_buffer_in_place(&mut working, source);
+        }
+        if let Some(incoming) = pending_bus_input.remove(&track.id) {
+            add_buffer_in_place(&mut working, &incoming);
+        }
+
+        stats.processed_effect_instances +=
+            apply_track_effect_chain(track, &mut working, project.sample_rate);
+
+        let mut post_fader = working.clone();
+        let track_gain = db_to_gain(track.gain_db) * pan_to_mono_gain(track.pan);
+        scale_buffer_in_place(&mut post_fader, track_gain);
+
+        route_buffer(
+            &post_fader,
+            track.output_bus,
+            1.0,
+            &mut pending_bus_input,
+            &mut master,
+        );
+
+        for send in track.sends.iter().filter(|send| send.enabled) {
+            let send_source = if send.pre_fader {
+                &working
+            } else {
+                &post_fader
+            };
+            let send_gain = db_to_gain(send.level_db) * pan_to_mono_gain(send.pan);
+            route_buffer(
+                send_source,
+                Some(send.target_bus),
+                send_gain,
+                &mut pending_bus_input,
+                &mut master,
+            );
+        }
+
+        stats.routed_tracks += 1;
     }
 
-    for frame in &mut buffer {
+    for (bus_id, bus_signal) in pending_bus_input {
+        warn!(track_id = %bus_id, "bus signal left unrouted; adding to master as fallback");
+        add_buffer_scaled_in_place(&mut master, &bus_signal, 1.0);
+    }
+
+    for frame in &mut master {
         *frame = frame.clamp(-1.0, 1.0);
     }
 
     debug!(
-        frames = buffer.len(),
-        rendered_notes = notes.len(),
-        rendered_audio_clips,
+        frames = master.len(),
+        rendered_notes = stats.rendered_notes,
+        rendered_audio_clips = stats.rendered_audio_clips,
+        routed_tracks = stats.routed_tracks,
+        processed_effect_instances = stats.processed_effect_instances,
         "audio render completed"
     );
-    buffer
+    master
 }
 
 fn render_project_samples_with_mode(
@@ -383,60 +465,492 @@ fn note_to_midi_events(note: &MidiNote, clip_start_tick: u64) -> [AbsoluteMidiEv
     ]
 }
 
-fn mix_audio_clips(project: &Project, buffer: &mut [f32]) -> usize {
-    let mut decoded_cache = HashMap::new();
-    let mut rendered_audio_clips = 0_usize;
+fn render_track_source_buffers(
+    project: &Project,
+    frame_count: usize,
+    stats: &mut RenderStats,
+) -> HashMap<Uuid, Vec<f32>> {
+    let mut decoded_cache: HashMap<String, DecodedAudio> = HashMap::new();
+    let mut buffers = HashMap::new();
 
     for track in &project.tracks {
         if !track.enabled || track.mute || track.hidden {
             continue;
         }
 
+        let mut track_buffer = vec![0.0_f32; frame_count];
         for clip in &track.clips {
             if clip.disabled {
                 continue;
             }
-            let ClipPayload::Audio(audio_clip) = &clip.payload else {
-                continue;
-            };
 
-            if !decoded_cache.contains_key(&audio_clip.source_path) {
-                match decode_audio_file_mono(Path::new(&audio_clip.source_path)) {
-                    Ok(decoded) => {
-                        decoded_cache.insert(audio_clip.source_path.clone(), decoded);
+            match &clip.payload {
+                ClipPayload::Audio(audio_clip) => {
+                    if !decoded_cache.contains_key(&audio_clip.source_path) {
+                        match decode_audio_file_mono(Path::new(&audio_clip.source_path)) {
+                            Ok(decoded) => {
+                                decoded_cache.insert(audio_clip.source_path.clone(), decoded);
+                            }
+                            Err(error) => {
+                                warn!(
+                                    path = %audio_clip.source_path,
+                                    ?error,
+                                    "failed to decode audio clip source while rendering, skipping clip"
+                                );
+                                continue;
+                            }
+                        }
                     }
-                    Err(error) => {
-                        warn!(
-                            path = %audio_clip.source_path,
-                            ?error,
-                            "failed to decode audio clip source while rendering, skipping clip"
-                        );
+
+                    let Some(decoded) = decoded_cache.get(&audio_clip.source_path) else {
+                        continue;
+                    };
+                    if decoded.samples.is_empty() {
                         continue;
                     }
+
+                    mix_audio_clip_samples(
+                        project,
+                        clip.start_tick,
+                        clip.length_ticks,
+                        audio_clip,
+                        decoded.sample_rate,
+                        &decoded.samples,
+                        &mut track_buffer,
+                    );
+                    stats.rendered_audio_clips += 1;
                 }
+                ClipPayload::Midi(midi_clip) => {
+                    let waveform = if matches!(track.kind, TrackKind::Chip) {
+                        Waveform::Pulse { duty_cycle: 0.5 }
+                    } else {
+                        Waveform::Triangle
+                    };
+                    let color = if matches!(track.kind, TrackKind::Chip) {
+                        VoiceColor::Sn76489
+                    } else {
+                        VoiceColor::Clean
+                    };
+                    for note in &midi_clip.notes {
+                        let event =
+                            synth_event_for_note(note, clip.start_tick, project, waveform, color);
+                        render_synth_event(&event, &mut track_buffer);
+                        stats.rendered_notes += 1;
+                    }
+                }
+                ClipPayload::Pattern(pattern_clip) => {
+                    let backend = chip_backend_for_source(&pattern_clip.source_chip);
+                    render_pattern_clip(
+                        pattern_clip,
+                        backend,
+                        clip.start_tick,
+                        project,
+                        &mut track_buffer,
+                        stats,
+                    );
+                }
+                ClipPayload::Automation(_) => {}
             }
+        }
 
-            let Some(decoded) = decoded_cache.get(&audio_clip.source_path) else {
-                continue;
-            };
-            if decoded.samples.is_empty() {
-                continue;
-            }
-
-            mix_audio_clip_samples(
-                project,
-                clip.start_tick,
-                clip.length_ticks,
-                audio_clip,
-                decoded.sample_rate,
-                &decoded.samples,
-                buffer,
-            );
-            rendered_audio_clips += 1;
+        if track_buffer
+            .iter()
+            .any(|sample| sample.abs() > f32::EPSILON)
+        {
+            buffers.insert(track.id, track_buffer);
         }
     }
 
-    rendered_audio_clips
+    buffers
+}
+
+fn render_pattern_clip(
+    pattern: &PatternClip,
+    backend: ChipBackend,
+    clip_start_tick: u64,
+    project: &Project,
+    buffer: &mut [f32],
+    stats: &mut RenderStats,
+) {
+    for note in &pattern.notes {
+        let macro_note = apply_pattern_macros(note, pattern, project.ppq);
+        let duty_cycle = duty_cycle_for_note(pattern, note.start_tick, project.ppq)
+            .map(|value| chip_backend_duty_cycle(backend, value))
+            .unwrap_or_else(|| chip_backend_default_duty(backend));
+        let waveform = chip_waveform_for_note(pattern, backend, note, project.ppq, duty_cycle);
+        let color = chip_backend_color(backend);
+        let mut event =
+            synth_event_for_note(&macro_note, clip_start_tick, project, waveform, color);
+        event.amplitude *= chip_backend_level(backend);
+        event.attack_frames = 8;
+        event.release_frames = 64;
+        render_synth_event(&event, buffer);
+        stats.rendered_notes += 1;
+    }
+}
+
+fn synth_event_for_note(
+    note: &MidiNote,
+    clip_start_tick: u64,
+    project: &Project,
+    waveform: Waveform,
+    color: VoiceColor,
+) -> SynthEvent {
+    let phase_increment =
+        frequency_to_phase_increment(note_frequency_hz(note.pitch), project.sample_rate);
+    let clip_note_start = clip_start_tick.saturating_add(note.start_tick);
+    let clip_note_end = clip_start_tick.saturating_add(note.end_tick());
+    let start_sample = ticks_to_samples(
+        clip_note_start,
+        project.bpm,
+        project.ppq,
+        project.sample_rate,
+    ) as usize;
+    let end_sample =
+        ticks_to_samples(clip_note_end, project.bpm, project.ppq, project.sample_rate) as usize;
+    let (start_sample, end_sample) = if end_sample <= start_sample {
+        (start_sample, start_sample.saturating_add(1))
+    } else {
+        (start_sample, end_sample)
+    };
+
+    SynthEvent {
+        start_sample,
+        end_sample,
+        amplitude: (f32::from(note.velocity.min(127)) / 127.0) * 0.18,
+        phase_increment,
+        attack_frames: 24,
+        release_frames: 72,
+        waveform,
+        color,
+    }
+}
+
+fn render_synth_event(event: &SynthEvent, buffer: &mut [f32]) {
+    let start = event.start_sample.min(buffer.len());
+    let end = event.end_sample.min(buffer.len());
+    if end <= start {
+        return;
+    }
+
+    let total = end.saturating_sub(start);
+    let attack_frames = event.attack_frames.min(total.saturating_sub(1));
+    let release_frames = event.release_frames.min(total.saturating_sub(1));
+    let mut phase = 0_u32;
+    let mut noise_state = match event.waveform {
+        Waveform::Noise { seed } => seed.max(1),
+        Waveform::Triangle | Waveform::Pulse { .. } => 0x1ACE_B00C,
+    };
+    let mut noise_phase = 0_u32;
+
+    for (index, frame) in buffer[start..end].iter_mut().enumerate() {
+        let attack_env = if attack_frames == 0 {
+            1.0
+        } else {
+            (index as f32 / attack_frames as f32).clamp(0.0, 1.0)
+        };
+        let remaining = total.saturating_sub(index + 1);
+        let release_env = if release_frames == 0 {
+            1.0
+        } else {
+            (remaining as f32 / release_frames as f32).clamp(0.0, 1.0)
+        };
+        let envelope = attack_env * release_env;
+
+        let raw = match event.waveform {
+            Waveform::Triangle => triangle_osc(phase),
+            Waveform::Pulse { duty_cycle } => pulse_osc(phase, duty_cycle),
+            Waveform::Noise { .. } => {
+                noise_phase = noise_phase.wrapping_add(event.phase_increment);
+                if noise_phase & 0xF000_0000 != 0 {
+                    noise_state = lfsr_step(noise_state);
+                    noise_phase &= 0x0FFF_FFFF;
+                }
+                if noise_state & 1 == 0 { 1.0 } else { -1.0 }
+            }
+        };
+
+        let colored = color_sample(raw, event.color);
+        *frame += colored * event.amplitude * envelope;
+        phase = phase.wrapping_add(event.phase_increment);
+    }
+}
+
+fn route_buffer(
+    signal: &[f32],
+    target_bus: Option<Uuid>,
+    gain: f32,
+    pending_bus_input: &mut HashMap<Uuid, Vec<f32>>,
+    master: &mut [f32],
+) {
+    if signal.is_empty() || gain.abs() <= f32::EPSILON {
+        return;
+    }
+
+    if let Some(bus_id) = target_bus {
+        let entry = pending_bus_input
+            .entry(bus_id)
+            .or_insert_with(|| vec![0.0; signal.len()]);
+        add_buffer_scaled_in_place(entry, signal, gain);
+    } else {
+        add_buffer_scaled_in_place(master, signal, gain);
+    }
+}
+
+fn track_topological_order(project: &Project) -> Vec<Uuid> {
+    let mut indegree = HashMap::<Uuid, usize>::new();
+    let mut adjacency = HashMap::<Uuid, Vec<Uuid>>::new();
+
+    for track in &project.tracks {
+        indegree.insert(track.id, 0);
+        adjacency.entry(track.id).or_default();
+    }
+
+    for track in &project.tracks {
+        if let Some(target) = track.output_bus
+            && indegree.contains_key(&target)
+        {
+            adjacency.entry(track.id).or_default().push(target);
+            if let Some(value) = indegree.get_mut(&target) {
+                *value += 1;
+            }
+        }
+        for send in track.sends.iter().filter(|send| send.enabled) {
+            if indegree.contains_key(&send.target_bus) {
+                adjacency.entry(track.id).or_default().push(send.target_bus);
+                if let Some(value) = indegree.get_mut(&send.target_bus) {
+                    *value += 1;
+                }
+            }
+        }
+    }
+
+    let mut queue = VecDeque::new();
+    for track in &project.tracks {
+        if indegree.get(&track.id).copied().unwrap_or_default() == 0 {
+            queue.push_back(track.id);
+        }
+    }
+
+    let mut order = Vec::with_capacity(project.tracks.len());
+    while let Some(node) = queue.pop_front() {
+        order.push(node);
+        if let Some(neighbors) = adjacency.get(&node) {
+            for neighbor in neighbors {
+                if let Some(value) = indegree.get_mut(neighbor) {
+                    *value = value.saturating_sub(1);
+                    if *value == 0 {
+                        queue.push_back(*neighbor);
+                    }
+                }
+            }
+        }
+    }
+
+    if order.len() != project.tracks.len() {
+        warn!("routing graph did not topologically sort cleanly; using project order fallback");
+        for track in &project.tracks {
+            if !order.contains(&track.id) {
+                order.push(track.id);
+            }
+        }
+    }
+
+    order
+}
+
+fn apply_track_effect_chain(track: &Track, buffer: &mut [f32], sample_rate: u32) -> usize {
+    let mut processed = 0_usize;
+    for effect in track.effects.iter().filter(|effect| effect.enabled) {
+        apply_effect(effect, buffer, sample_rate);
+        processed += 1;
+    }
+    processed
+}
+
+fn apply_effect(effect: &EffectSpec, buffer: &mut [f32], sample_rate: u32) {
+    let effect_name = effect.name.trim().to_ascii_lowercase();
+    match effect_name.as_str() {
+        "eq" => apply_eq(effect, buffer, sample_rate),
+        "comp" | "compressor" => apply_compressor(effect, buffer, sample_rate),
+        "reverb" => apply_reverb(effect, buffer, sample_rate),
+        "delay" => apply_delay(effect, buffer, sample_rate),
+        "limiter" => apply_limiter(effect, buffer, sample_rate),
+        "bitcrusher" => apply_bitcrusher(effect, buffer),
+        _ => debug!(effect = %effect.name, "effect name has no built-in renderer, skipping"),
+    }
+}
+
+fn apply_eq(effect: &EffectSpec, buffer: &mut [f32], sample_rate: u32) {
+    let low_gain = db_to_gain(effect_param(effect, "low_gain_db", 0.0));
+    let mid_gain = db_to_gain(effect_param(effect, "mid_gain_db", 0.0));
+    let high_gain = db_to_gain(effect_param(effect, "high_gain_db", 0.0));
+    let low_freq = effect_param(effect, "low_freq_hz", 120.0).clamp(20.0, 2_000.0);
+    let high_freq = effect_param(effect, "high_freq_hz", 8_000.0).clamp(400.0, 20_000.0);
+    let low_alpha = one_pole_alpha(low_freq, sample_rate);
+    let high_alpha = one_pole_alpha(high_freq, sample_rate);
+    let mut low_state = 0.0_f32;
+    let mut high_lp_state = 0.0_f32;
+
+    for sample in buffer {
+        low_state += low_alpha * (*sample - low_state);
+        high_lp_state += high_alpha * (*sample - high_lp_state);
+        let low = low_state;
+        let high = *sample - high_lp_state;
+        let mid = *sample - low - high;
+        *sample = (low * low_gain) + (mid * mid_gain) + (high * high_gain);
+    }
+}
+
+fn apply_compressor(effect: &EffectSpec, buffer: &mut [f32], sample_rate: u32) {
+    let threshold_db = effect_param(effect, "threshold_db", -18.0).clamp(-60.0, 0.0);
+    let ratio = effect_param(effect, "ratio", 4.0).clamp(1.0, 24.0);
+    let attack_ms = effect_param(effect, "attack_ms", 10.0).clamp(0.1, 250.0);
+    let release_ms = effect_param(effect, "release_ms", 120.0).clamp(1.0, 1_500.0);
+    let makeup_gain = db_to_gain(effect_param(effect, "makeup_db", 0.0).clamp(-24.0, 24.0));
+
+    let attack_coeff = exp_smoothing_coeff(attack_ms / 1_000.0, sample_rate);
+    let release_coeff = exp_smoothing_coeff(release_ms / 1_000.0, sample_rate);
+    let mut envelope = 0.0_f32;
+
+    for sample in buffer {
+        let level = sample.abs().max(1e-6);
+        if level > envelope {
+            envelope = (attack_coeff * envelope) + ((1.0 - attack_coeff) * level);
+        } else {
+            envelope = (release_coeff * envelope) + ((1.0 - release_coeff) * level);
+        }
+
+        let envelope_db = linear_to_db(envelope);
+        let gain_reduction_db = if envelope_db > threshold_db {
+            let compressed_db = threshold_db + ((envelope_db - threshold_db) / ratio);
+            compressed_db - envelope_db
+        } else {
+            0.0
+        };
+        let gain = db_to_gain(gain_reduction_db) * makeup_gain;
+        *sample *= gain;
+    }
+}
+
+fn apply_delay(effect: &EffectSpec, buffer: &mut [f32], sample_rate: u32) {
+    let mix = effect_param(effect, "mix", 0.25).clamp(0.0, 1.0);
+    let time_ms = effect_param(effect, "time_ms", 320.0).clamp(1.0, 2_000.0);
+    let feedback = effect_param(effect, "feedback", 0.38).clamp(0.0, 0.95);
+    let hi_cut_hz = effect_param(effect, "hi_cut_hz", 6_500.0).clamp(800.0, 20_000.0);
+    let delay_samples = ((time_ms / 1_000.0) * sample_rate as f32).round() as usize;
+    let delay_samples = delay_samples.max(1);
+    let mut line = vec![0.0_f32; delay_samples];
+    let mut cursor = 0_usize;
+    let alpha = one_pole_alpha(hi_cut_hz, sample_rate);
+    let mut filtered_feedback = 0.0_f32;
+
+    for sample in buffer {
+        let delayed = line[cursor];
+        filtered_feedback += alpha * (delayed - filtered_feedback);
+        line[cursor] = *sample + (filtered_feedback * feedback);
+        *sample = (*sample * (1.0 - mix)) + (delayed * mix);
+        cursor += 1;
+        if cursor >= line.len() {
+            cursor = 0;
+        }
+    }
+}
+
+fn apply_reverb(effect: &EffectSpec, buffer: &mut [f32], sample_rate: u32) {
+    let mix = effect_param(effect, "mix", 0.18).clamp(0.0, 1.0);
+    let room_size = effect_param(effect, "room_size", 0.62).clamp(0.0, 1.0);
+    let damping = effect_param(effect, "damping", 0.45).clamp(0.0, 0.98);
+    let width = effect_param(effect, "width", 0.85).clamp(0.0, 1.0);
+    let feedback = 0.35 + (room_size * 0.5);
+    let base = ((sample_rate as f32 * 0.015) + (sample_rate as f32 * 0.03 * room_size)) as usize;
+    let line_len_a = base.max(1);
+    let line_len_b = ((line_len_a as f32 * 1.37).round() as usize).max(1);
+    let line_len_c = ((line_len_a as f32 * 1.91).round() as usize).max(1);
+    let mut line_a = vec![0.0_f32; line_len_a];
+    let mut line_b = vec![0.0_f32; line_len_b];
+    let mut line_c = vec![0.0_f32; line_len_c];
+    let mut cursor_a = 0_usize;
+    let mut cursor_b = 0_usize;
+    let mut cursor_c = 0_usize;
+    let damping_hz = ((1.0 - damping) * 8_000.0) + 1_000.0;
+    let alpha = one_pole_alpha(damping_hz, sample_rate);
+    let mut damp_a = 0.0_f32;
+    let mut damp_b = 0.0_f32;
+    let mut damp_c = 0.0_f32;
+    let wet_gain = 0.7 + (0.3 * width);
+
+    for sample in buffer {
+        let tap_a = line_a[cursor_a];
+        let tap_b = line_b[cursor_b];
+        let tap_c = line_c[cursor_c];
+
+        damp_a += alpha * (tap_a - damp_a);
+        damp_b += alpha * (tap_b - damp_b);
+        damp_c += alpha * (tap_c - damp_c);
+
+        line_a[cursor_a] = *sample + (damp_c * feedback);
+        line_b[cursor_b] = *sample + (damp_a * feedback);
+        line_c[cursor_c] = *sample + (damp_b * feedback);
+
+        let wet = ((damp_a + damp_b + damp_c) / 3.0) * wet_gain;
+        *sample = (*sample * (1.0 - mix)) + (wet * mix);
+
+        cursor_a = (cursor_a + 1) % line_a.len();
+        cursor_b = (cursor_b + 1) % line_b.len();
+        cursor_c = (cursor_c + 1) % line_c.len();
+    }
+}
+
+fn apply_limiter(effect: &EffectSpec, buffer: &mut [f32], sample_rate: u32) {
+    let ceiling_db = effect_param(effect, "ceiling_db", -0.8).clamp(-12.0, 0.0);
+    let ceiling = db_to_gain(ceiling_db);
+    let release_ms = effect_param(effect, "release_ms", 80.0).clamp(1.0, 500.0);
+    let release_coeff = exp_smoothing_coeff(release_ms / 1_000.0, sample_rate);
+    let mut gain = 1.0_f32;
+
+    for sample in buffer {
+        let amplitude = sample.abs().max(1e-6);
+        let needed = if amplitude * gain > ceiling {
+            ceiling / amplitude
+        } else {
+            1.0
+        };
+
+        if needed < gain {
+            gain = needed;
+        } else {
+            gain = (release_coeff * gain) + ((1.0 - release_coeff) * 1.0);
+        }
+        *sample *= gain;
+        *sample = sample.clamp(-ceiling, ceiling);
+    }
+}
+
+fn apply_bitcrusher(effect: &EffectSpec, buffer: &mut [f32]) {
+    let bits = effect_param(effect, "bits", 8.0).round().clamp(2.0, 16.0) as u32;
+    let downsample = effect_param(effect, "downsample", 2.0)
+        .round()
+        .clamp(1.0, 32.0) as usize;
+    let levels = (1_u32 << bits) as f32;
+    let step = 2.0 / (levels - 1.0);
+    let mut held = 0.0_f32;
+    let mut hold_counter = 0_usize;
+
+    for sample in buffer {
+        if hold_counter == 0 {
+            held = (((sample.clamp(-1.0, 1.0) + 1.0) / step).round() * step) - 1.0;
+        }
+        *sample = held;
+        hold_counter += 1;
+        if hold_counter >= downsample {
+            hold_counter = 0;
+        }
+    }
+}
+
+fn effect_param(effect: &EffectSpec, key: &str, default: f32) -> f32 {
+    effect.params.get(key).copied().unwrap_or(default)
 }
 
 fn mix_audio_clip_samples(
@@ -488,7 +1002,7 @@ fn mix_audio_clip_samples(
     let fade_out_frames =
         (audio.fade_out_seconds.max(0.0) * f64::from(project.sample_rate)).round() as usize;
 
-    let pan_gain = 1.0 - (audio.pan.abs() * 0.2);
+    let pan_gain = pan_to_mono_gain(audio.pan);
     let clip_gain = db_to_gain(audio.gain_db) * pan_gain;
 
     for frame_index in 0..output_frames {
@@ -543,91 +1057,48 @@ fn fade_envelope(
     gain
 }
 
+fn add_buffer_in_place(target: &mut [f32], source: &[f32]) {
+    for (dest, value) in target.iter_mut().zip(source.iter().copied()) {
+        *dest += value;
+    }
+}
+
+fn add_buffer_scaled_in_place(target: &mut [f32], source: &[f32], gain: f32) {
+    for (dest, value) in target.iter_mut().zip(source.iter().copied()) {
+        *dest += value * gain;
+    }
+}
+
+fn scale_buffer_in_place(buffer: &mut [f32], gain: f32) {
+    for sample in buffer {
+        *sample *= gain;
+    }
+}
+
 fn db_to_gain(gain_db: f32) -> f32 {
     10.0_f32.powf(gain_db / 20.0)
 }
 
-fn collect_rendered_notes(project: &Project) -> Vec<RenderedNote> {
-    let mut notes = Vec::new();
-
-    for track in &project.tracks {
-        if !track.enabled || track.mute || track.hidden {
-            continue;
-        }
-
-        let waveform = match track.kind {
-            TrackKind::Chip => Waveform::Square,
-            TrackKind::Midi | TrackKind::Audio | TrackKind::Automation | TrackKind::Bus => {
-                Waveform::Triangle
-            }
-        };
-
-        for clip in &track.clips {
-            if clip.disabled {
-                continue;
-            }
-
-            match &clip.payload {
-                ClipPayload::Midi(midi) => {
-                    for note in &midi.notes {
-                        push_rendered_note(&mut notes, note, clip.start_tick, project, waveform);
-                    }
-                }
-                ClipPayload::Pattern(pattern) => {
-                    for note in &pattern.notes {
-                        let macro_note = apply_pattern_macros(note, pattern, project.ppq);
-                        push_rendered_note(
-                            &mut notes,
-                            &macro_note,
-                            clip.start_tick,
-                            project,
-                            waveform,
-                        );
-                    }
-                }
-                ClipPayload::Audio(_) | ClipPayload::Automation(_) => {}
-            }
-        }
-    }
-
-    notes
+fn linear_to_db(value: f32) -> f32 {
+    20.0 * value.max(1e-6).log10()
 }
 
-fn push_rendered_note(
-    rendered_notes: &mut Vec<RenderedNote>,
-    note: &MidiNote,
-    clip_start_tick: u64,
-    project: &Project,
-    waveform: Waveform,
-) {
-    let phase_increment =
-        frequency_to_phase_increment(note_frequency_hz(note.pitch), project.sample_rate);
-    let clip_note_start = clip_start_tick.saturating_add(note.start_tick);
-    let clip_note_end = clip_start_tick.saturating_add(note.end_tick());
-    let start_sample = ticks_to_samples(
-        clip_note_start,
-        project.bpm,
-        project.ppq,
-        project.sample_rate,
-    ) as usize;
-    let end_sample =
-        ticks_to_samples(clip_note_end, project.bpm, project.ppq, project.sample_rate) as usize;
+fn pan_to_mono_gain(pan: f32) -> f32 {
+    1.0 - (pan.abs().clamp(0.0, 1.0) * 0.2)
+}
 
-    if end_sample <= start_sample {
-        warn!(
-            note_pitch = note.pitch,
-            start_sample, end_sample, "skipping zero-length note in renderer"
-        );
-        return;
-    }
+fn one_pole_alpha(cutoff_hz: f32, sample_rate: u32) -> f32 {
+    let cutoff = cutoff_hz.max(10.0);
+    let dt = 1.0 / sample_rate.max(1) as f32;
+    let rc = 1.0 / (std::f32::consts::TAU * cutoff);
+    (dt / (rc + dt)).clamp(0.0, 1.0)
+}
 
-    rendered_notes.push(RenderedNote {
-        start_sample,
-        end_sample,
-        amplitude: (f32::from(note.velocity.min(127)) / 127.0) * 0.18,
-        phase_increment,
-        waveform,
-    });
+fn exp_smoothing_coeff(time_seconds: f32, sample_rate: u32) -> f32 {
+    let tau = time_seconds.max(1e-4);
+    (-1.0 / (tau * sample_rate.max(1) as f32))
+        .exp()
+        .clamp(0.0, 1.0)
 }
 
 fn apply_pattern_macros(note: &MidiNote, pattern: &PatternClip, ppq: u16) -> MidiNote {
@@ -694,6 +1165,100 @@ fn macro_value_at_step(lane: &ChipMacroLane, step: usize) -> i16 {
     lane.values[step.min(lane.values.len() - 1)]
 }
 
+fn duty_cycle_for_note(pattern: &PatternClip, note_start_tick: u64, ppq: u16) -> Option<i16> {
+    macro_lane(pattern, "duty")
+        .and_then(|lane| macro_value_for_note(lane, note_start_tick, pattern.lines_per_beat, ppq))
+}
+
+fn chip_backend_for_source(source_chip: &str) -> ChipBackend {
+    let normalized = source_chip.trim().to_ascii_lowercase();
+    if normalized.contains("gameboy") || normalized.contains("gb_apu") {
+        ChipBackend::GameBoyApu
+    } else if normalized.contains("nes")
+        || normalized.contains("2a03")
+        || normalized.contains("vrc6")
+    {
+        ChipBackend::NesApu
+    } else if normalized.contains("sn76489")
+        || normalized.contains("psg")
+        || normalized.contains("ay-3-8910")
+    {
+        ChipBackend::Sn76489
+    } else {
+        ChipBackend::Generic
+    }
+}
+
+fn chip_backend_duty_cycle(backend: ChipBackend, value: i16) -> f32 {
+    let value = value.clamp(-127, 127);
+    match backend {
+        ChipBackend::GameBoyApu | ChipBackend::NesApu => {
+            let step = value.clamp(0, 3) as usize;
+            [0.125, 0.25, 0.5, 0.75][step]
+        }
+        ChipBackend::Sn76489 | ChipBackend::Generic => {
+            let normalized = (f32::from(value) + 127.0) / 254.0;
+            (0.1 + (normalized * 0.8)).clamp(0.05, 0.95)
+        }
+    }
+}
+
+fn chip_backend_default_duty(backend: ChipBackend) -> f32 {
+    match backend {
+        ChipBackend::GameBoyApu => 0.5,
+        ChipBackend::NesApu => 0.5,
+        ChipBackend::Sn76489 => 0.5,
+        ChipBackend::Generic => 0.5,
+    }
+}
+
+fn chip_backend_color(backend: ChipBackend) -> VoiceColor {
+    match backend {
+        ChipBackend::GameBoyApu => VoiceColor::GameBoyApu,
+        ChipBackend::NesApu => VoiceColor::NesApu,
+        ChipBackend::Sn76489 => VoiceColor::Sn76489,
+        ChipBackend::Generic => VoiceColor::Clean,
+    }
+}
+
+fn chip_backend_level(backend: ChipBackend) -> f32 {
+    match backend {
+        ChipBackend::GameBoyApu => 0.95,
+        ChipBackend::NesApu => 0.9,
+        ChipBackend::Sn76489 => 0.92,
+        ChipBackend::Generic => 1.0,
+    }
+}
+
+fn chip_waveform_for_note(
+    pattern: &PatternClip,
+    backend: ChipBackend,
+    note: &MidiNote,
+    ppq: u16,
+    duty_cycle: f32,
+) -> Waveform {
+    let normalized = pattern.source_chip.trim().to_ascii_lowercase();
+    if normalized.contains("noise")
+        || macro_lane(pattern, "noise")
+            .and_then(|lane| {
+                macro_value_for_note(lane, note.start_tick, pattern.lines_per_beat, ppq)
+            })
+            .unwrap_or_default()
+            > 0
+    {
+        let seed = 0xBEEF_u32
+            .wrapping_mul(u32::from(note.pitch).saturating_add(1))
+            .wrapping_add(note.start_tick as u32);
+        return Waveform::Noise { seed };
+    }
+
+    if matches!(backend, ChipBackend::NesApu) && normalized.contains("triangle") {
+        return Waveform::Triangle;
+    }
+
+    Waveform::Pulse { duty_cycle }
+}
+
 fn sanitize_stem_name(name: &str) -> String {
     let mut out = String::with_capacity(name.len());
     let mut previous_underscore = false;
@@ -738,8 +1303,9 @@ fn note_frequency_hz(pitch: u8) -> f64 {
     440.0 * 2_f64.powf(semitone_offset / 12.0)
 }
 
-fn square_osc(phase: u32) -> f32 {
-    if phase < 0x8000_0000 { 1.0 } else { -1.0 }
+fn pulse_osc(phase: u32, duty_cycle: f32) -> f32 {
+    let threshold = (duty_cycle.clamp(0.01, 0.99) * u32::MAX as f32) as u32;
+    if phase < threshold { 1.0 } else { -1.0 }
 }
 
 fn triangle_osc(phase: u32) -> f32 {
@@ -749,4 +1315,21 @@ fn triangle_osc(phase: u32) -> f32 {
     } else {
         3.0 - (phase_unit * 4.0)
     }
+}
+
+fn color_sample(sample: f32, color: VoiceColor) -> f32 {
+    match color {
+        VoiceColor::Clean => sample,
+        VoiceColor::GameBoyApu => {
+            let quantized = (sample * 15.0).round() / 15.0;
+            quantized * 0.95
+        }
+        VoiceColor::NesApu => (sample * 1.15).tanh(),
+        VoiceColor::Sn76489 => (sample * 7.0).round() / 7.0,
+    }
+}
+
+fn lfsr_step(state: u32) -> u32 {
+    let bit = ((state >> 0) ^ (state >> 1)) & 1;
+    (state >> 1) | (bit << 30)
 }

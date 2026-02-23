@@ -17,11 +17,11 @@ pub use diagnostics::{
 };
 pub use engine::{
     AddClipRequest, AddTrackRequest, AudioClipPatch, Engine, EngineError, ExportKind, RenderMode,
-    TrackStatePatch,
+    TrackMixPatch, TrackStatePatch,
 };
 pub use model::{
     AudioClip, AutomationClip, AutomationPoint, ChipMacroLane, Clip, ClipPayload,
     DEFAULT_TRACKER_LINES_PER_BEAT, EffectSpec, MidiClip, MidiNote, PatternClip, Project, Track,
-    TrackKind, TrackerRow, Transport,
+    TrackKind, TrackSend, TrackerRow, Transport,
 };
 pub use parity::{ParityReport, generate_parity_report};

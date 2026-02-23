@@ -14,7 +14,7 @@
 - [x] Project create/load/save/autosave flows
 - [x] Global transport state (play/stop + loop)
 - [x] Extensive structured tracing in Rust core
-- [ ] Crash recovery UX polish in desktop app
+- [x] Crash recovery UX polish in desktop app
 
 ## Phase 2: Composition Core (MIDI + Playlist)
 
@@ -23,7 +23,7 @@
 - [x] Add and move MIDI/pattern clips
 - [x] Basic clip visualization in playlist
 - [x] Effect attachment primitives per track
-- [ ] Full piano roll editor with note drag/resize
+- [x] Full piano roll editor with note drag/resize
 - [x] Quantize/transpose tools
 - [x] Marker and loop-region editor UI
 
@@ -39,14 +39,14 @@
 - [x] Pattern clip payload shape and chip-source metadata
 - [x] Tracker grid editor (rows/effects)
 - [x] Chip macro editor (duty/env/arpeggio)
-- [ ] Real chip backend emulation pipeline
+- [x] Real chip backend emulation pipeline
 
 ## Phase 5: Mixer/FX/Routing
 
 - [x] Track-level effect chain model
-- [ ] Mixer buses/sends/routing graph
-- [ ] Built-in FX suite (EQ/comp/reverb/delay/limiter)
-- [ ] Automation lanes and parameter IDs
+- [x] Mixer buses/sends/routing graph
+- [x] Built-in FX suite (EQ/comp/reverb/delay/limiter)
+- [x] Automation lanes and parameter IDs
 
 ## Phase 6: Export/Render
 

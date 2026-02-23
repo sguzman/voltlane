@@ -8,7 +8,7 @@ import { TransportBar } from "./components/TransportBar";
 import { useProjectStore } from "./store/projectStore";
 import type { TrackKind } from "./types";
 
-const TRACK_KINDS: TrackKind[] = ["midi", "chip", "audio", "automation"];
+const TRACK_KINDS: TrackKind[] = ["midi", "chip", "audio", "automation", "bus"];
 
 export default function App() {
   const [newProjectName, setNewProjectName] = useState("Voltlane Session");
@@ -19,6 +19,9 @@ export default function App() {
     loading,
     error,
     exportRenderMode,
+    automationParameterIds,
+    autosaveRecoveryPath,
+    autosaveRecoveryModifiedEpochMs,
     selectedTrackId,
     selectedClipId,
     audioAssets,
@@ -29,8 +32,12 @@ export default function App() {
     createNewProject,
     addTrackByKind,
     addQuickClip,
+    addAutomationLaneClip,
     addBasicEffect,
     setTrackFlag,
+    setTrackMix,
+    saveTrackSend,
+    deleteTrackSend,
     shiftTrack,
     setPlaybackState,
     configureLoop,
@@ -40,6 +47,7 @@ export default function App() {
     replaceClipNotes,
     replacePatternRows,
     replacePatternMacros,
+    replaceAutomationClip,
     transposeClip,
     quantizeClip,
     scanAudioLibrary,
@@ -51,6 +59,8 @@ export default function App() {
     saveCurrentProject,
     loadCurrentProject,
     runAutosave,
+    restoreAutosave,
+    dismissAutosaveRecovery,
     refreshParity,
     clearError,
     setSelectedTrack,
@@ -175,7 +185,125 @@ export default function App() {
                 >
                   Add Bitcrusher
                 </button>
+                <button
+                  type="button"
+                  className="pill"
+                  onClick={() =>
+                    void setTrackMix(selectedTrack.id, {
+                      gain_db: selectedTrack.gain_db + 1
+                    })
+                  }
+                >
+                  Gain +1dB
+                </button>
+                <button
+                  type="button"
+                  className="pill"
+                  onClick={() =>
+                    void setTrackMix(selectedTrack.id, {
+                      gain_db: selectedTrack.gain_db - 1
+                    })
+                  }
+                >
+                  Gain -1dB
+                </button>
+                <button
+                  type="button"
+                  className="pill"
+                  onClick={() =>
+                    void setTrackMix(selectedTrack.id, {
+                      pan: Math.max(-1, selectedTrack.pan - 0.1)
+                    })
+                  }
+                >
+                  Pan Left
+                </button>
+                <button
+                  type="button"
+                  className="pill"
+                  onClick={() =>
+                    void setTrackMix(selectedTrack.id, {
+                      pan: Math.min(1, selectedTrack.pan + 0.1)
+                    })
+                  }
+                >
+                  Pan Right
+                </button>
+                {selectedTrack.kind === "automation" ? (
+                  <button
+                    type="button"
+                    className="pill"
+                    onClick={() => void addAutomationLaneClip(selectedTrack.id)}
+                  >
+                    Add Auto Clip
+                  </button>
+                ) : null}
               </div>
+              {selectedTrack.kind !== "bus" ? (
+                <div className="panel__grid">
+                  <label className="field">
+                    <span>Output Bus</span>
+                    <select
+                      value={selectedTrack.output_bus ?? ""}
+                      onChange={(event) =>
+                        void setTrackMix(selectedTrack.id, {
+                          output_bus_id: event.target.value || null
+                        })
+                      }
+                    >
+                      <option value="">Master</option>
+                      {project.tracks
+                        .filter((candidate) => candidate.kind === "bus" && candidate.id !== selectedTrack.id)
+                        .map((bus) => (
+                          <option key={bus.id} value={bus.id}>
+                            {bus.name}
+                          </option>
+                        ))}
+                    </select>
+                  </label>
+                </div>
+              ) : null}
+              {selectedTrack.kind !== "bus" && project.tracks.some((candidate) => candidate.kind === "bus") ? (
+                <>
+                  <h3>Sends</h3>
+                  <div className="button-grid">
+                    {project.tracks
+                      .filter((candidate) => candidate.kind === "bus" && candidate.id !== selectedTrack.id)
+                      .map((bus) => (
+                        <button
+                          key={bus.id}
+                          type="button"
+                          className="pill"
+                          onClick={() =>
+                            void saveTrackSend(selectedTrack.id, {
+                              target_bus_id: bus.id,
+                              level_db: -9,
+                              pan: 0,
+                              enabled: true
+                            })
+                          }
+                        >
+                          Send to {bus.name}
+                        </button>
+                      ))}
+                  </div>
+                  {selectedTrack.sends.map((send) => (
+                    <div key={send.id} className="clip-editor__actions">
+                      <span className="transport__meta">
+                        {project.tracks.find((candidate) => candidate.id === send.target_bus)?.name ?? send.target_bus}{" "}
+                        {send.level_db.toFixed(1)} dB
+                      </span>
+                      <button
+                        type="button"
+                        className="mini"
+                        onClick={() => void deleteTrackSend(selectedTrack.id, send.id)}
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  ))}
+                </>
+              ) : null}
             </>
           ) : null}
         </aside>
@@ -227,6 +355,10 @@ export default function App() {
           onReplacePatternMacros={(trackId, clipId, macros) =>
             void replacePatternMacros(trackId, clipId, macros)
           }
+          automationParameterIds={automationParameterIds}
+          onReplaceAutomationClip={(trackId, clipId, targetParameterId, points) =>
+            void replaceAutomationClip(trackId, clipId, targetParameterId, points)
+          }
           onTranspose={(trackId, clipId, semitones) => void transposeClip(trackId, clipId, semitones)}
           onQuantize={(trackId, clipId, gridTicks) => void quantizeClip(trackId, clipId, gridTicks)}
           onPatchAudioClip={(trackId, clipId, patch) =>
@@ -253,6 +385,23 @@ export default function App() {
           <span>{error}</span>
           <button type="button" onClick={clearError}>
             Dismiss
+          </button>
+        </div>
+      ) : null}
+
+      {autosaveRecoveryPath ? (
+        <div className="toast" role="alert">
+          <span>
+            Autosave found
+            {autosaveRecoveryModifiedEpochMs
+              ? ` (${new Date(autosaveRecoveryModifiedEpochMs).toLocaleString()})`
+              : ""}
+          </span>
+          <button type="button" onClick={() => void restoreAutosave()}>
+            Restore
+          </button>
+          <button type="button" onClick={dismissAutosaveRecovery}>
+            Ignore
           </button>
         </div>
       ) : null}

@@ -97,6 +97,15 @@ export interface EffectSpec {
   params: Record<string, number>;
 }
 
+export interface TrackSend {
+  id: string;
+  target_bus: string;
+  level_db: number;
+  pan: number;
+  pre_fader: boolean;
+  enabled: boolean;
+}
+
 export interface Track {
   id: string;
   name: string;
@@ -106,6 +115,10 @@ export interface Track {
   mute: boolean;
   solo: boolean;
   enabled: boolean;
+  gain_db: number;
+  pan: number;
+  output_bus: string | null;
+  sends: TrackSend[];
   effects: EffectSpec[];
   clips: Clip[];
 }
@@ -264,6 +277,55 @@ export interface PatchTrackInput {
   mute?: boolean;
   solo?: boolean;
   enabled?: boolean;
+}
+
+export interface PatchTrackMixInput {
+  track_id: string;
+  gain_db?: number;
+  pan?: number;
+  output_bus_id?: string;
+  clear_output_bus?: boolean;
+}
+
+export interface TrackSendInput {
+  id?: string;
+  target_bus_id: string;
+  level_db?: number;
+  pan?: number;
+  pre_fader?: boolean;
+  enabled?: boolean;
+}
+
+export interface UpsertTrackSendInput {
+  track_id: string;
+  send: TrackSendInput;
+}
+
+export interface RemoveTrackSendInput {
+  track_id: string;
+  send_id: string;
+}
+
+export interface AddAutomationClipInput {
+  track_id: string;
+  name: string;
+  start_tick: number;
+  length_ticks: number;
+  target_parameter_id?: string;
+  points: AutomationPoint[];
+}
+
+export interface UpdateAutomationClipInput {
+  track_id: string;
+  clip_id: string;
+  target_parameter_id?: string;
+  points: AutomationPoint[];
+}
+
+export interface AutosaveStatus {
+  exists: boolean;
+  path: string | null;
+  modified_epoch_ms: number | null;
 }
 
 export interface ParityReport {

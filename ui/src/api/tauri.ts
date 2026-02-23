@@ -3,17 +3,21 @@ import { invoke } from "@tauri-apps/api/core";
 import { logger } from "../lib/logger";
 import type {
   AddClipNoteInput,
+  AddAutomationClipInput,
   AnalyzeAudioAssetInput,
   AddMidiClipInput,
   AddTrackRequest,
+  AutosaveStatus,
   AudioAnalysis,
   AudioAssetEntry,
   Clip,
   ExportProjectInput,
   ImportAudioClipInput,
   MoveClipInput,
+  RemoveTrackSendInput,
   QuantizeClipNotesInput,
   ParityReport,
+  PatchTrackMixInput,
   PatchTrackInput,
   Project,
   RemoveClipNoteInput,
@@ -23,8 +27,10 @@ import type {
   TrackKind,
   TransposeClipNotesInput,
   UpdateAudioClipInput,
+  UpdateAutomationClipInput,
   UpdatePatternMacrosInput,
   UpdatePatternRowsInput,
+  UpsertTrackSendInput,
   UpdateClipNotesInput
 } from "../types";
 
@@ -62,6 +68,10 @@ function createTrack(name: string, color: string, kind: TrackKind): Track {
     mute: false,
     solo: false,
     enabled: true,
+    gain_db: 0,
+    pan: 0,
+    output_bus: null,
+    sends: [],
     effects: [],
     clips: []
   };
@@ -93,6 +103,16 @@ function createMockProject(title = "Voltlane Mock", bpm = 140): Project {
 }
 
 let mockProject: Project = createMockProject();
+
+function normalizeProjectShape(project: Project): Project {
+  for (const track of project.tracks) {
+    if (typeof track.gain_db !== "number") track.gain_db = 0;
+    if (typeof track.pan !== "number") track.pan = 0;
+    if (typeof track.output_bus !== "string") track.output_bus = null;
+    if (!Array.isArray(track.sends)) track.sends = [];
+  }
+  return project;
+}
 
 function touchProject(): void {
   mockProject.updated_at = nowIso();
@@ -146,6 +166,20 @@ function synthParity(project: Project): ParityReport {
     midi_hash: tinyHash(midiJson),
     audio_hash: tinyHash(audioJson)
   };
+}
+
+function synthAutomationParameterIds(project: Project): string[] {
+  const ids: string[] = [];
+  for (const track of project.tracks) {
+    ids.push(`track:${track.id}:gain_db`);
+    ids.push(`track:${track.id}:pan`);
+    for (const effect of track.effects) {
+      for (const key of Object.keys(effect.params)) {
+        ids.push(`track:${track.id}:effect:${effect.id}:${key}`);
+      }
+    }
+  }
+  return Array.from(new Set(ids)).sort();
 }
 
 function getClipRefs(project: Project, trackId: string, clipId: string): { track: Track; clip: Clip } {
@@ -288,6 +322,39 @@ async function invokeMock<T>(command: string, args?: Record<string, unknown>): P
       return mockProject as T;
     }
 
+    case "patch_track_mix": {
+      const input = args?.input as PatchTrackMixInput;
+      const track = mockProject.tracks.find((candidate) => candidate.id === input.track_id);
+      if (!track) {
+        throw new Error(`track not found: ${input.track_id}`);
+      }
+
+      if (typeof input.gain_db === "number") {
+        track.gain_db = Math.max(-96, Math.min(12, input.gain_db));
+      }
+      if (typeof input.pan === "number") {
+        track.pan = Math.max(-1, Math.min(1, input.pan));
+      }
+
+      if (input.clear_output_bus) {
+        track.output_bus = null;
+      } else if (typeof input.output_bus_id === "string") {
+        const targetBus = mockProject.tracks.find(
+          (candidate) => candidate.id === input.output_bus_id && candidate.kind === "bus"
+        );
+        if (!targetBus) {
+          throw new Error(`invalid bus target: ${input.output_bus_id}`);
+        }
+        if (targetBus.id === track.id) {
+          throw new Error(`track cannot route to itself: ${track.id}`);
+        }
+        track.output_bus = targetBus.id;
+      }
+
+      touchProject();
+      return mockProject as T;
+    }
+
     case "reorder_track": {
       const { from, to } = args?.input as ReorderTrackInput;
       const moved = mockProject.tracks.splice(from, 1)[0];
@@ -328,6 +395,36 @@ async function invokeMock<T>(command: string, args?: Record<string, unknown>): P
       touchProject();
       return mockProject as T;
     }
+
+    case "add_automation_clip": {
+      const input = args?.input as AddAutomationClipInput;
+      const track = mockProject.tracks.find((candidate) => candidate.id === input.track_id);
+      if (!track) {
+        throw new Error(`track not found: ${input.track_id}`);
+      }
+
+      track.clips.push({
+        id: crypto.randomUUID(),
+        name: input.name,
+        start_tick: input.start_tick,
+        length_ticks: Math.max(1, Math.round(input.length_ticks)),
+        disabled: false,
+        payload: {
+          automation: {
+            target_parameter_id:
+              input.target_parameter_id?.trim() || `track:${track.id}:gain_db`,
+            points: [...input.points]
+              .filter((point) => Number.isFinite(point.value))
+              .sort((left, right) => left.tick - right.tick)
+          }
+        }
+      });
+      touchProject();
+      return mockProject as T;
+    }
+
+    case "get_automation_parameter_ids":
+      return synthAutomationParameterIds(mockProject) as T;
 
     case "scan_audio_assets": {
       const input = args?.input as ScanAudioAssetsInput | undefined;
@@ -466,6 +563,23 @@ async function invokeMock<T>(command: string, args?: Record<string, unknown>): P
       return mockProject as T;
     }
 
+    case "update_automation_clip": {
+      const input = args?.input as UpdateAutomationClipInput;
+      const { clip } = getClipRefs(mockProject, input.track_id, input.clip_id);
+      if (!("automation" in clip.payload)) {
+        throw new Error(`clip payload is not automation: ${input.clip_id}`);
+      }
+      if (typeof input.target_parameter_id === "string") {
+        clip.payload.automation.target_parameter_id =
+          input.target_parameter_id.trim() || clip.payload.automation.target_parameter_id;
+      }
+      clip.payload.automation.points = [...input.points]
+        .filter((point) => Number.isFinite(point.value))
+        .sort((left, right) => left.tick - right.tick);
+      touchProject();
+      return mockProject as T;
+    }
+
     case "update_pattern_rows": {
       const input = args?.input as UpdatePatternRowsInput;
       const { clip } = getClipRefs(mockProject, input.track_id, input.clip_id);
@@ -585,12 +699,86 @@ async function invokeMock<T>(command: string, args?: Record<string, unknown>): P
         throw new Error(`track not found: ${input.track_id}`);
       }
 
+      const normalized = input.effect_name.trim().toLowerCase();
+      let params: Record<string, number> = {};
+      if (normalized === "eq") {
+        params = {
+          low_gain_db: 0,
+          mid_gain_db: 0,
+          high_gain_db: 0,
+          low_freq_hz: 120,
+          high_freq_hz: 8000
+        };
+      } else if (normalized === "comp" || normalized === "compressor") {
+        params = {
+          threshold_db: -18,
+          ratio: 4,
+          attack_ms: 10,
+          release_ms: 120,
+          makeup_db: 0
+        };
+      } else if (normalized === "reverb") {
+        params = { mix: 0.18, room_size: 0.62, damping: 0.45, width: 0.85 };
+      } else if (normalized === "delay") {
+        params = { mix: 0.25, time_ms: 320, feedback: 0.38, hi_cut_hz: 6500 };
+      } else if (normalized === "limiter") {
+        params = { ceiling_db: -0.8, release_ms: 80 };
+      } else if (normalized === "bitcrusher") {
+        params = { bits: 8, downsample: 2 };
+      }
+
       track.effects.push({
         id: crypto.randomUUID(),
         name: input.effect_name,
         enabled: true,
-        params: {}
+        params
       });
+      touchProject();
+      return mockProject as T;
+    }
+
+    case "upsert_track_send": {
+      const input = args?.input as UpsertTrackSendInput;
+      const track = mockProject.tracks.find((candidate) => candidate.id === input.track_id);
+      if (!track) {
+        throw new Error(`track not found: ${input.track_id}`);
+      }
+
+      const targetBus = mockProject.tracks.find(
+        (candidate) => candidate.id === input.send.target_bus_id && candidate.kind === "bus"
+      );
+      if (!targetBus) {
+        throw new Error(`invalid bus target: ${input.send.target_bus_id}`);
+      }
+      const send = {
+        id: input.send.id ?? crypto.randomUUID(),
+        target_bus: input.send.target_bus_id,
+        level_db: Math.max(-96, Math.min(12, input.send.level_db ?? 0)),
+        pan: Math.max(-1, Math.min(1, input.send.pan ?? 0)),
+        pre_fader: Boolean(input.send.pre_fader),
+        enabled: input.send.enabled ?? true
+      };
+      const existing = track.sends.findIndex((candidate) => candidate.id === send.id);
+      if (existing >= 0) {
+        track.sends[existing] = send;
+      } else {
+        track.sends.push(send);
+      }
+      touchProject();
+      return mockProject as T;
+    }
+
+    case "remove_track_send": {
+      const input = args?.input as RemoveTrackSendInput;
+      const track = mockProject.tracks.find((candidate) => candidate.id === input.track_id);
+      if (!track) {
+        throw new Error(`track not found: ${input.track_id}`);
+      }
+      const before = track.sends.length;
+      track.sends = track.sends.filter((send) => send.id !== input.send_id);
+      if (track.sends.length === before) {
+        throw new Error(`send not found: ${input.send_id}`);
+      }
       touchProject();
       return mockProject as T;
     }
@@ -628,13 +816,23 @@ async function invokeMock<T>(command: string, args?: Record<string, unknown>): P
       if (!stored) {
         throw new Error("no saved mock project found");
       }
-      mockProject = JSON.parse(stored) as Project;
+      mockProject = normalizeProjectShape(JSON.parse(stored) as Project);
       return mockProject as T;
     }
 
     case "autosave_project": {
       localStorage.setItem("voltlane.mock.autosave", JSON.stringify(mockProject));
       return "localStorage://voltlane.mock.autosave" as T;
+    }
+
+    case "get_autosave_status": {
+      const exists = localStorage.getItem("voltlane.mock.autosave") !== null;
+      const status: AutosaveStatus = {
+        exists,
+        path: exists ? "localStorage://voltlane.mock.autosave" : null,
+        modified_epoch_ms: exists ? Date.now() : null
+      };
+      return status as T;
     }
 
     case "measure_parity":
@@ -654,27 +852,47 @@ async function invokeCommand<T>(command: string, args?: Record<string, unknown>)
 }
 
 export async function getProject(): Promise<Project> {
-  return invokeCommand<Project>("get_project");
+  return normalizeProjectShape(await invokeCommand<Project>("get_project"));
 }
 
 export async function createProject(input: CreateProjectInput): Promise<Project> {
-  return invokeCommand<Project>("create_project", { input });
+  return normalizeProjectShape(await invokeCommand<Project>("create_project", { input }));
 }
 
 export async function addTrack(request: AddTrackRequest): Promise<Project> {
-  return invokeCommand<Project>("add_track", { request });
+  return normalizeProjectShape(await invokeCommand<Project>("add_track", { request }));
 }
 
 export async function patchTrackState(input: PatchTrackInput): Promise<Project> {
-  return invokeCommand<Project>("patch_track_state", { input });
+  return normalizeProjectShape(await invokeCommand<Project>("patch_track_state", { input }));
+}
+
+export async function patchTrackMix(input: PatchTrackMixInput): Promise<Project> {
+  return normalizeProjectShape(await invokeCommand<Project>("patch_track_mix", { input }));
+}
+
+export async function upsertTrackSend(input: UpsertTrackSendInput): Promise<Project> {
+  return normalizeProjectShape(await invokeCommand<Project>("upsert_track_send", { input }));
+}
+
+export async function removeTrackSend(input: RemoveTrackSendInput): Promise<Project> {
+  return normalizeProjectShape(await invokeCommand<Project>("remove_track_send", { input }));
 }
 
 export async function reorderTrack(input: ReorderTrackInput): Promise<Project> {
-  return invokeCommand<Project>("reorder_track", { input });
+  return normalizeProjectShape(await invokeCommand<Project>("reorder_track", { input }));
 }
 
 export async function addMidiClip(input: AddMidiClipInput): Promise<Project> {
-  return invokeCommand<Project>("add_midi_clip", { input });
+  return normalizeProjectShape(await invokeCommand<Project>("add_midi_clip", { input }));
+}
+
+export async function addAutomationClip(input: AddAutomationClipInput): Promise<Project> {
+  return normalizeProjectShape(await invokeCommand<Project>("add_automation_clip", { input }));
+}
+
+export async function getAutomationParameterIds(): Promise<string[]> {
+  return invokeCommand<string[]>("get_automation_parameter_ids");
 }
 
 export async function scanAudioAssets(input?: ScanAudioAssetsInput): Promise<AudioAssetEntry[]> {
@@ -686,51 +904,55 @@ export async function analyzeAudioAsset(input: AnalyzeAudioAssetInput): Promise<
 }
 
 export async function importAudioClip(input: ImportAudioClipInput): Promise<Project> {
-  return invokeCommand<Project>("import_audio_clip", { input });
+  return normalizeProjectShape(await invokeCommand<Project>("import_audio_clip", { input }));
 }
 
 export async function updateAudioClip(input: UpdateAudioClipInput): Promise<Project> {
-  return invokeCommand<Project>("update_audio_clip", { input });
+  return normalizeProjectShape(await invokeCommand<Project>("update_audio_clip", { input }));
 }
 
 export async function moveClip(input: MoveClipInput): Promise<Project> {
-  return invokeCommand<Project>("move_clip", { input });
+  return normalizeProjectShape(await invokeCommand<Project>("move_clip", { input }));
 }
 
 export async function updateClipNotes(input: UpdateClipNotesInput): Promise<Project> {
-  return invokeCommand<Project>("update_clip_notes", { input });
+  return normalizeProjectShape(await invokeCommand<Project>("update_clip_notes", { input }));
+}
+
+export async function updateAutomationClip(input: UpdateAutomationClipInput): Promise<Project> {
+  return normalizeProjectShape(await invokeCommand<Project>("update_automation_clip", { input }));
 }
 
 export async function updatePatternRows(input: UpdatePatternRowsInput): Promise<Project> {
-  return invokeCommand<Project>("update_pattern_rows", { input });
+  return normalizeProjectShape(await invokeCommand<Project>("update_pattern_rows", { input }));
 }
 
 export async function updatePatternMacros(input: UpdatePatternMacrosInput): Promise<Project> {
-  return invokeCommand<Project>("update_pattern_macros", { input });
+  return normalizeProjectShape(await invokeCommand<Project>("update_pattern_macros", { input }));
 }
 
 export async function addClipNote(input: AddClipNoteInput): Promise<Project> {
-  return invokeCommand<Project>("add_clip_note", { input });
+  return normalizeProjectShape(await invokeCommand<Project>("add_clip_note", { input }));
 }
 
 export async function removeClipNote(input: RemoveClipNoteInput): Promise<Project> {
-  return invokeCommand<Project>("remove_clip_note", { input });
+  return normalizeProjectShape(await invokeCommand<Project>("remove_clip_note", { input }));
 }
 
 export async function transposeClipNotes(input: TransposeClipNotesInput): Promise<Project> {
-  return invokeCommand<Project>("transpose_clip_notes", { input });
+  return normalizeProjectShape(await invokeCommand<Project>("transpose_clip_notes", { input }));
 }
 
 export async function quantizeClipNotes(input: QuantizeClipNotesInput): Promise<Project> {
-  return invokeCommand<Project>("quantize_clip_notes", { input });
+  return normalizeProjectShape(await invokeCommand<Project>("quantize_clip_notes", { input }));
 }
 
 export async function addEffect(input: AddEffectInput): Promise<Project> {
-  return invokeCommand<Project>("add_effect", { input });
+  return normalizeProjectShape(await invokeCommand<Project>("add_effect", { input }));
 }
 
 export async function setPlayback(isPlaying: boolean): Promise<Project> {
-  return invokeCommand<Project>("set_playback", { isPlaying });
+  return normalizeProjectShape(await invokeCommand<Project>("set_playback", { isPlaying }));
 }
 
 export async function setLoopRegion(
@@ -738,11 +960,11 @@ export async function setLoopRegion(
   loopEndTick: number,
   loopEnabled: boolean
 ): Promise<Project> {
-  return invokeCommand<Project>("set_loop_region", {
+  return normalizeProjectShape(await invokeCommand<Project>("set_loop_region", {
     loopStartTick,
     loopEndTick,
     loopEnabled
-  });
+  }));
 }
 
 export async function exportProject(input: ExportProjectInput): Promise<string> {
@@ -750,15 +972,19 @@ export async function exportProject(input: ExportProjectInput): Promise<string> 
 }
 
 export async function saveProject(path: string): Promise<Project> {
-  return invokeCommand<Project>("save_project", { path });
+  return normalizeProjectShape(await invokeCommand<Project>("save_project", { path }));
 }
 
 export async function loadProject(path: string): Promise<Project> {
-  return invokeCommand<Project>("load_project", { path });
+  return normalizeProjectShape(await invokeCommand<Project>("load_project", { path }));
 }
 
 export async function autosaveProject(autosaveDir: string): Promise<string> {
   return invokeCommand<string>("autosave_project", { autosaveDir });
+}
+
+export async function getAutosaveStatus(): Promise<AutosaveStatus> {
+  return invokeCommand<AutosaveStatus>("get_autosave_status");
 }
 
 export async function measureParity(): Promise<ParityReport> {

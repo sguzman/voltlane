@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
-import type { ChipMacroLane, Clip, MidiNote, TrackerRow } from "../types";
+import type { AutomationPoint, ChipMacroLane, Clip, MidiNote, TrackerRow } from "../types";
 
 interface ClipEditorProps {
   clip: Clip | null;
@@ -18,6 +18,13 @@ interface ClipEditorProps {
     linesPerBeat?: number
   ) => void;
   onReplacePatternMacros: (trackId: string, clipId: string, macros: ChipMacroLane[]) => void;
+  automationParameterIds: string[];
+  onReplaceAutomationClip: (
+    trackId: string,
+    clipId: string,
+    targetParameterId: string | undefined,
+    points: AutomationPoint[]
+  ) => void;
   onTranspose: (trackId: string, clipId: string, semitones: number) => void;
   onQuantize: (trackId: string, clipId: string, gridTicks: number) => void;
   onPatchAudioClip: (
@@ -63,6 +70,32 @@ function clipPatternMacros(clip: Clip | null): ChipMacroLane[] {
   return clip.payload.pattern.macros;
 }
 
+function clipAutomationPoints(clip: Clip | null): AutomationPoint[] {
+  if (!clip || !("automation" in clip.payload)) {
+    return [];
+  }
+  return clip.payload.automation.points;
+}
+
+function clipAutomationTarget(clip: Clip | null): string {
+  if (!clip || !("automation" in clip.payload)) {
+    return "";
+  }
+  return clip.payload.automation.target_parameter_id;
+}
+
+const PIANO_MIN_PITCH = 24;
+const PIANO_MAX_PITCH = 96;
+const PIANO_ROW_HEIGHT = 14;
+
+type PianoDragState = {
+  mode: "move" | "resize";
+  noteIndex: number;
+  startClientX: number;
+  startClientY: number;
+  originalNote: MidiNote;
+};
+
 export function ClipEditor({
   clip,
   trackId,
@@ -74,6 +107,8 @@ export function ClipEditor({
   onReplaceNotes,
   onReplacePatternRows,
   onReplacePatternMacros,
+  automationParameterIds,
+  onReplaceAutomationClip,
   onTranspose,
   onQuantize,
   onPatchAudioClip
@@ -83,6 +118,11 @@ export function ClipEditor({
   const [draftNotes, setDraftNotes] = useState<MidiNote[]>([]);
   const [draftRows, setDraftRows] = useState<TrackerRow[]>([]);
   const [draftMacros, setDraftMacros] = useState<ChipMacroLane[]>([]);
+  const [draftAutomationPoints, setDraftAutomationPoints] = useState<AutomationPoint[]>([]);
+  const [draftAutomationTarget, setDraftAutomationTarget] = useState("");
+  const [pianoSnapTicks, setPianoSnapTicks] = useState(120);
+  const [pianoDrag, setPianoDrag] = useState<PianoDragState | null>(null);
+  const pianoRollRef = useRef<HTMLDivElement | null>(null);
   const [linesPerBeat, setLinesPerBeat] = useState(4);
   const [audioGainDb, setAudioGainDb] = useState(0);
   const [audioPan, setAudioPan] = useState(0);
@@ -99,6 +139,9 @@ export function ClipEditor({
     setDraftNotes(clipNotes(clip));
     setDraftRows(clipTrackerRows(clip));
     setDraftMacros(clipPatternMacros(clip));
+    setDraftAutomationPoints(clipAutomationPoints(clip));
+    setDraftAutomationTarget(clipAutomationTarget(clip));
+    setPianoDrag(null);
     if (clip && "pattern" in clip.payload) {
       setLinesPerBeat(clip.payload.pattern.lines_per_beat);
     } else {
@@ -118,6 +161,10 @@ export function ClipEditor({
     }
   }, [clip]);
 
+  useEffect(() => {
+    setPianoSnapTicks(Math.max(1, Math.round(ppq / 4)));
+  }, [ppq]);
+
   const isMidiEditable = useMemo(() => {
     if (!clip) {
       return false;
@@ -132,9 +179,87 @@ export function ClipEditor({
     return "pattern" in clip.payload;
   }, [clip]);
 
+  const isAutomationEditable = useMemo(() => {
+    if (!clip) {
+      return false;
+    }
+    return "automation" in clip.payload;
+  }, [clip]);
+
   const isAudioEditable = useMemo(() => {
     return clip ? "audio" in clip.payload : false;
   }, [clip]);
+
+  const pianoVisibleTicks = useMemo(() => {
+    const noteEnd = draftNotes.reduce((max, note) => Math.max(max, note.start_tick + note.length_ticks), 0);
+    return Math.max(ppq * 4, clipLength, noteEnd + ppq);
+  }, [clipLength, draftNotes, ppq]);
+
+  const pianoRows = PIANO_MAX_PITCH - PIANO_MIN_PITCH + 1;
+
+  useEffect(() => {
+    if (!pianoDrag) {
+      return;
+    }
+
+    const onPointerMove = (event: MouseEvent) => {
+      const container = pianoRollRef.current;
+      if (!container) {
+        return;
+      }
+      const width = container.clientWidth;
+      if (width <= 0) {
+        return;
+      }
+
+      const dx = event.clientX - pianoDrag.startClientX;
+      const dy = event.clientY - pianoDrag.startClientY;
+      const ticksPerPixel = pianoVisibleTicks / width;
+      const tickDeltaRaw = Math.round(dx * ticksPerPixel);
+      const tickDelta =
+        Math.round(tickDeltaRaw / Math.max(1, pianoSnapTicks)) * Math.max(1, pianoSnapTicks);
+      const rowDelta = Math.round(dy / PIANO_ROW_HEIGHT);
+
+      setDraftNotes((notes) =>
+        notes.map((note, noteIndex) => {
+          if (noteIndex !== pianoDrag.noteIndex) {
+            return note;
+          }
+
+          if (pianoDrag.mode === "move") {
+            const nextPitch = Math.max(
+              PIANO_MIN_PITCH,
+              Math.min(PIANO_MAX_PITCH, pianoDrag.originalNote.pitch - rowDelta)
+            );
+            return {
+              ...note,
+              pitch: nextPitch,
+              start_tick: Math.max(0, pianoDrag.originalNote.start_tick + tickDelta)
+            };
+          }
+
+          return {
+            ...note,
+            length_ticks: Math.max(
+              Math.max(1, pianoSnapTicks),
+              pianoDrag.originalNote.length_ticks + tickDelta
+            )
+          };
+        })
+      );
+    };
+
+    const onPointerUp = () => {
+      setPianoDrag(null);
+    };
+
+    window.addEventListener("mousemove", onPointerMove);
+    window.addEventListener("mouseup", onPointerUp);
+    return () => {
+      window.removeEventListener("mousemove", onPointerMove);
+      window.removeEventListener("mouseup", onPointerUp);
+    };
+  }, [pianoDrag, pianoVisibleTicks, pianoSnapTicks]);
 
   if (!clip || !trackId) {
     return (
@@ -186,6 +311,81 @@ export function ClipEditor({
 
       {isMidiEditable ? (
         <>
+          <div className="clip-editor__actions">
+            <label className="field">
+              <span>Piano Snap (ticks)</span>
+              <input
+                type="number"
+                min={1}
+                step={1}
+                value={pianoSnapTicks}
+                onChange={(event) => setPianoSnapTicks(Math.max(1, Number(event.target.value)))}
+              />
+            </label>
+          </div>
+
+          <div
+            className="piano-roll"
+            ref={pianoRollRef}
+            style={{ height: `${pianoRows * PIANO_ROW_HEIGHT}px` }}
+          >
+            {Array.from({ length: pianoRows }, (_, rowIndex) => {
+              const pitch = PIANO_MAX_PITCH - rowIndex;
+              return (
+                <div
+                  key={`row-${pitch}`}
+                  className={`piano-roll__row ${pitch % 12 === 0 ? "piano-roll__row--octave" : ""}`}
+                  style={{ top: `${rowIndex * PIANO_ROW_HEIGHT}px` }}
+                />
+              );
+            })}
+            {draftNotes.map((note, noteIndex) => {
+              const clampedPitch = Math.max(PIANO_MIN_PITCH, Math.min(PIANO_MAX_PITCH, note.pitch));
+              const left = (note.start_tick / pianoVisibleTicks) * 100;
+              const width = Math.max((note.length_ticks / pianoVisibleTicks) * 100, 0.8);
+              const top = (PIANO_MAX_PITCH - clampedPitch) * PIANO_ROW_HEIGHT;
+              return (
+                <div
+                  key={`piano-note-${noteIndex}-${note.start_tick}-${note.pitch}`}
+                  className="piano-roll__note"
+                  style={{
+                    left: `${left}%`,
+                    width: `${width}%`,
+                    top: `${top}px`,
+                    height: `${PIANO_ROW_HEIGHT - 1}px`
+                  }}
+                  onMouseDown={(event) => {
+                    event.preventDefault();
+                    setPianoDrag({
+                      mode: "move",
+                      noteIndex,
+                      startClientX: event.clientX,
+                      startClientY: event.clientY,
+                      originalNote: { ...note }
+                    });
+                  }}
+                >
+                  <span className="piano-roll__note-label">{note.pitch}</span>
+                  <button
+                    type="button"
+                    className="piano-roll__resize"
+                    onMouseDown={(event) => {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      setPianoDrag({
+                        mode: "resize",
+                        noteIndex,
+                        startClientX: event.clientX,
+                        startClientY: event.clientY,
+                        originalNote: { ...note }
+                      });
+                    }}
+                  />
+                </div>
+              );
+            })}
+          </div>
+
           <div className="clip-editor__actions">
             <button
               type="button"
@@ -664,6 +864,124 @@ export function ClipEditor({
         </>
       ) : null}
 
+      {isAutomationEditable ? (
+        <>
+          <h3 className="clip-editor__subheading">Automation Lane</h3>
+          <div className="panel__grid">
+            <label className="field">
+              <span>Target Parameter</span>
+              <select
+                value={draftAutomationTarget}
+                onChange={(event) => setDraftAutomationTarget(event.target.value)}
+              >
+                {automationParameterIds.length === 0 ? (
+                  <option value={draftAutomationTarget}>No automatable params</option>
+                ) : null}
+                {automationParameterIds.map((target) => (
+                  <option key={target} value={target}>
+                    {target}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <button
+              type="button"
+              className="pill"
+              disabled={loading}
+              onClick={() =>
+                setDraftAutomationPoints([
+                  ...draftAutomationPoints,
+                  { tick: 0, value: 1 }
+                ])
+              }
+            >
+              Add Point
+            </button>
+            <button
+              type="button"
+              className="pill"
+              disabled={loading}
+              onClick={() =>
+                onReplaceAutomationClip(
+                  trackId,
+                  clip.id,
+                  draftAutomationTarget,
+                  draftAutomationPoints
+                )
+              }
+            >
+              Save Automation
+            </button>
+          </div>
+
+          <div className="clip-editor__table-wrap">
+            <table className="clip-editor__table">
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>Tick</th>
+                  <th>Value</th>
+                  <th />
+                </tr>
+              </thead>
+              <tbody>
+                {draftAutomationPoints.map((point, index) => (
+                  <tr key={`${point.tick}-${index}`}>
+                    <td>{index + 1}</td>
+                    <td>
+                      <input
+                        type="number"
+                        min={0}
+                        step={30}
+                        value={point.tick}
+                        onChange={(event) => {
+                          const next = [...draftAutomationPoints];
+                          next[index] = { ...point, tick: Math.max(0, Number(event.target.value)) };
+                          setDraftAutomationPoints(next);
+                        }}
+                      />
+                    </td>
+                    <td>
+                      <input
+                        type="number"
+                        step={0.01}
+                        value={point.value}
+                        onChange={(event) => {
+                          const next = [...draftAutomationPoints];
+                          next[index] = { ...point, value: Number(event.target.value) };
+                          setDraftAutomationPoints(next);
+                        }}
+                      />
+                    </td>
+                    <td>
+                      <button
+                        type="button"
+                        className="mini"
+                        disabled={loading}
+                        onClick={() =>
+                          setDraftAutomationPoints(
+                            draftAutomationPoints.filter(
+                              (_, candidateIndex) => candidateIndex !== index
+                            )
+                          )
+                        }
+                      >
+                        Delete
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+                {draftAutomationPoints.length === 0 ? (
+                  <tr>
+                    <td colSpan={4}>No automation points yet.</td>
+                  </tr>
+                ) : null}
+              </tbody>
+            </table>
+          </div>
+        </>
+      ) : null}
+
       {isAudioEditable ? (
         <>
           <div className="panel__grid">
@@ -770,7 +1088,7 @@ export function ClipEditor({
         </>
       ) : null}
 
-      {!isMidiEditable && !isPatternEditable && !isAudioEditable ? (
+      {!isMidiEditable && !isPatternEditable && !isAutomationEditable && !isAudioEditable ? (
         <p>This clip type is not editable yet.</p>
       ) : null}
     </aside>

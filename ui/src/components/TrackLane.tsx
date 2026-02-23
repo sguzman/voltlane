@@ -24,6 +24,12 @@ function clipTypeLabel(track: Track): string {
   if (track.kind === "audio") {
     return "Import";
   }
+  if (track.kind === "automation") {
+    return "Lane";
+  }
+  if (track.kind === "bus") {
+    return "Route";
+  }
   return "Clip";
 }
 
@@ -113,6 +119,7 @@ export function TrackLane({
         <button
           type="button"
           className="mini"
+          disabled={track.kind === "bus"}
           onClick={(event) => {
             event.stopPropagation();
             onAddClip(track.id, track.kind);
