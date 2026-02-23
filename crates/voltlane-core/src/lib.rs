@@ -7,7 +7,9 @@ pub mod parity;
 pub mod persistence;
 pub mod time;
 
-pub use diagnostics::{TelemetryGuard, init_tracing};
+pub use diagnostics::{
+    TelemetryGuard, init_tracing, init_tracing_with_file_prefix, init_tracing_with_options,
+};
 pub use engine::{
     AddClipRequest, AddTrackRequest, Engine, EngineError, ExportKind, TrackStatePatch,
 };

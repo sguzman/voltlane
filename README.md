@@ -40,6 +40,22 @@ The current implementation targets Milestone A/B from your planning document: pr
 
 ## Build and Run
 
+## Runtime Config
+
+The app reads runtime settings from:
+
+- `voltlane.config.toml`
+
+This file now contains the app parameters (mode, defaults, diagnostics, paths, Wayland behavior, export binary path).
+
+Current mode is set to:
+
+- `mode = "dev"`
+
+In `dev` mode, each app launch writes timestamped Rust tracing logs into:
+
+- `logs/`
+
 ### Install dependencies
 
 ```bash
@@ -68,20 +84,18 @@ pnpm run tauri:dev
 
 ### Wayland note (Linux)
 
-Voltlane now auto-applies `WEBKIT_DISABLE_DMABUF_RENDERER=1` at startup when
-`WAYLAND_DISPLAY` is present to avoid WebKitGTK protocol errors on some
-Wayland compositor/driver combinations.
+Voltlane reads Wayland compatibility toggles from `voltlane.config.toml`.
+With the current config it auto-applies:
+
+- `WEBKIT_DISABLE_DMABUF_RENDERER=1`
+
+when `WAYLAND_DISPLAY` is present.
 
 ## Logging
 
-- Core tracing is initialized at runtime with session UUID and JSON file logs.
+- Core tracing is initialized at runtime with session UUID and per-run timestamped JSON log files.
 - Tauri plugin log forwards logs to stdout, log dir, and webview stream.
-- Default log levels:
-  - `voltlane_core=trace`
-  - `voltlane_tauri=trace`
-  - global `info`
-
-You can override with `RUST_LOG`.
+- Log filtering and sink behavior are configured in `voltlane.config.toml`.
 
 ## Parity Harness
 

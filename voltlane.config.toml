@@ -1,0 +1,31 @@
+mode = "dev"
+
+[project]
+default_title = "Voltlane Session"
+default_bpm = 140.0
+default_sample_rate = 48000
+
+[transport]
+default_loop_start_tick = 0
+default_loop_end_tick = 1920
+metronome_enabled = true
+
+[diagnostics]
+rust_log_filter = "trace,voltlane_core=trace,voltlane_tauri=trace,tauri_plugin_log=info"
+trace_file_prefix = "voltlane"
+tauri_log_level = "trace"
+tauri_log_stdout = true
+tauri_log_webview = true
+tauri_log_file = true
+
+[paths]
+dev_logs_dir = "logs"
+dev_autosave_dir = "tmp/autosave"
+dev_export_dir = "tmp/out"
+
+[wayland]
+enable_workarounds = true
+disable_dmabuf_renderer = true
+
+[export]
+ffmpeg_binary = "ffmpeg"

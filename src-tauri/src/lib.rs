@@ -1,5 +1,8 @@
-use std::path::Path;
+mod config;
 
+use std::path::{Path, PathBuf};
+
+use anyhow::Context;
 use parking_lot::Mutex;
 use serde::Deserialize;
 use tauri::{Manager, State};
@@ -8,12 +11,14 @@ use tracing::{error, info, instrument};
 use uuid::Uuid;
 use voltlane_core::{
     AddClipRequest, AddTrackRequest, ClipPayload, Engine, ExportKind, MidiClip, MidiNote,
-    ParityReport, PatternClip, Project, TrackStatePatch, init_tracing,
+    ParityReport, PatternClip, Project, TrackStatePatch, init_tracing_with_options,
 };
 
-#[derive(Default)]
+use crate::config::{AppConfig, AppMode};
+
 struct AppState {
     engine: Mutex<Engine>,
+    config: AppConfig,
 }
 
 #[derive(Debug, Deserialize)]
@@ -82,8 +87,14 @@ fn create_project(state: State<'_, AppState>, input: CreateProjectInput) -> Proj
     let mut engine = state.engine.lock();
     engine.create_project(
         input.title,
-        input.bpm.unwrap_or(140.0),
-        input.sample_rate.unwrap_or(48_000),
+        input
+            .bpm
+            .unwrap_or(state.config.project.default_bpm)
+            .max(20.0),
+        input
+            .sample_rate
+            .unwrap_or(state.config.project.default_sample_rate)
+            .max(8_000),
     );
     engine.project().clone()
 }
@@ -210,7 +221,12 @@ fn set_loop_region(
 #[tauri::command]
 fn export_project(state: State<'_, AppState>, input: ExportProjectInput) -> Result<String, String> {
     let engine = state.engine.lock();
-    let ffmpeg_binary = input.ffmpeg_binary.as_deref().map(Path::new);
+    let ffmpeg_path = input
+        .ffmpeg_binary
+        .as_deref()
+        .unwrap_or(state.config.export.ffmpeg_binary.as_str());
+    let ffmpeg_binary = Some(Path::new(ffmpeg_path));
+
     engine
         .export(input.kind, Path::new(&input.output_path), ffmpeg_binary)
         .map_err(|error| error.to_string())?;
@@ -239,9 +255,18 @@ fn load_project(state: State<'_, AppState>, path: String) -> Result<Project, Str
 #[instrument(skip(state), fields(path = %autosave_dir))]
 #[tauri::command]
 fn autosave_project(state: State<'_, AppState>, autosave_dir: String) -> Result<String, String> {
+    let autosave_path = if autosave_dir.trim().is_empty() {
+        match state.config.mode {
+            AppMode::Dev => resolve_dev_path(&state.config.paths.dev_autosave_dir),
+            AppMode::Prod => PathBuf::from("autosave"),
+        }
+    } else {
+        PathBuf::from(autosave_dir)
+    };
+
     let engine = state.engine.lock();
     let path = engine
-        .autosave(Path::new(&autosave_dir))
+        .autosave(&autosave_path)
         .map_err(|error| error.to_string())?;
     Ok(path.display().to_string())
 }
@@ -257,29 +282,116 @@ fn parse_uuid(value: &str) -> Result<Uuid, String> {
     Uuid::parse_str(value).map_err(|error| format!("invalid UUID '{value}': {error}"))
 }
 
+fn parse_level_filter(value: &str) -> LevelFilter {
+    match value.to_ascii_lowercase().as_str() {
+        "off" => LevelFilter::Off,
+        "error" => LevelFilter::Error,
+        "warn" => LevelFilter::Warn,
+        "debug" => LevelFilter::Debug,
+        "trace" => LevelFilter::Trace,
+        _ => LevelFilter::Info,
+    }
+}
+
+fn resolve_dev_path(path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        return path.to_path_buf();
+    }
+
+    std::env::current_dir()
+        .map(|cwd| cwd.join(path))
+        .unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn resolve_runtime_log_dir(config: &AppConfig, app: &tauri::App) -> anyhow::Result<PathBuf> {
+    match config.mode {
+        AppMode::Dev => Ok(resolve_dev_path(&config.paths.dev_logs_dir)),
+        AppMode::Prod => app
+            .path()
+            .app_log_dir()
+            .map_err(|error| anyhow::anyhow!(error.to_string())),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn configure_wayland_env(config: &AppConfig) {
+    let is_wayland = std::env::var_os("WAYLAND_DISPLAY").is_some();
+    if !is_wayland || !config.wayland.enable_workarounds {
+        return;
+    }
+
+    if config.wayland.disable_dmabuf_renderer
+        && std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none()
+    {
+        // SAFETY: Applied at process startup before any threads are spawned.
+        unsafe {
+            std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+        }
+    }
+}
+
+fn initial_engine(config: &AppConfig) -> Engine {
+    let mut project = Project::new(
+        config.project.default_title.clone(),
+        config.project.default_bpm,
+        config.project.default_sample_rate,
+    );
+    project.transport.loop_start_tick = config.transport.default_loop_start_tick;
+    project.transport.loop_end_tick = config.transport.default_loop_end_tick;
+    project.transport.metronome_enabled = config.transport.metronome_enabled;
+    Engine::new(project)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let config = AppConfig::load().unwrap_or_else(|error| {
+        panic!("failed to load app config from voltlane.config.toml: {error}");
+    });
+
+    #[cfg(target_os = "linux")]
+    configure_wayland_env(&config);
+
+    let tauri_log_level = parse_level_filter(&config.diagnostics.tauri_log_level);
+    let mut tauri_log_builder = tauri_plugin_log::Builder::new()
+        .level(tauri_log_level)
+        .level_for("voltlane_core", LevelFilter::Trace)
+        .level_for("voltlane_tauri", LevelFilter::Trace);
+
+    if config.diagnostics.tauri_log_stdout {
+        tauri_log_builder = tauri_log_builder.target(Target::new(TargetKind::Stdout));
+    }
+    if config.diagnostics.tauri_log_webview {
+        tauri_log_builder = tauri_log_builder.target(Target::new(TargetKind::Webview));
+    }
+    if config.diagnostics.tauri_log_file {
+        tauri_log_builder = match config.mode {
+            AppMode::Dev => tauri_log_builder.target(Target::new(TargetKind::Folder {
+                path: resolve_dev_path(&config.paths.dev_logs_dir),
+                file_name: Some("voltlane-tauri".to_string()),
+            })),
+            AppMode::Prod => tauri_log_builder.target(Target::new(TargetKind::LogDir {
+                file_name: Some("voltlane-tauri".to_string()),
+            })),
+        };
+    }
+
+    let app_state = AppState {
+        engine: Mutex::new(initial_engine(&config)),
+        config: config.clone(),
+    };
+
     tauri::Builder::default()
-        .plugin(
-            tauri_plugin_log::Builder::new()
-                .level(LevelFilter::Info)
-                .level_for("voltlane_core", LevelFilter::Trace)
-                .level_for("voltlane_tauri", LevelFilter::Trace)
-                .target(Target::new(TargetKind::Stdout))
-                .target(Target::new(TargetKind::Webview))
-                .target(Target::new(TargetKind::LogDir {
-                    file_name: Some("voltlane-tauri".to_string()),
-                }))
-                .build(),
-        )
-        .setup(|app| {
-            let log_dir = app
-                .path()
-                .app_log_dir()
-                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-            let telemetry = init_tracing(&log_dir)
-                .map_err(|error| anyhow::anyhow!("tracing init failed: {error}"))?;
+        .plugin(tauri_log_builder.build())
+        .setup(move |app| {
+            let log_dir = resolve_runtime_log_dir(&config, app)?;
+            let telemetry = init_tracing_with_options(
+                &log_dir,
+                &config.diagnostics.trace_file_prefix,
+                &config.diagnostics.rust_log_filter,
+            )
+            .context("tracing init failed")?;
             info!(
+                mode = ?config.mode,
                 session_id = %telemetry.session_id,
                 log_dir = %log_dir.display(),
                 "voltlane tauri setup complete"
@@ -289,7 +401,7 @@ pub fn run() {
             let _telemetry_ref = Box::leak(Box::new(telemetry));
             Ok(())
         })
-        .manage(AppState::default())
+        .manage(app_state)
         .invoke_handler(tauri::generate_handler![
             get_project,
             create_project,
