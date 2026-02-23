@@ -68,8 +68,8 @@ MIDI SoundFont defaults are configured here too:
 
 Audio workflow defaults are configured here:
 
-- `audio.asset_directories = ["tmp/audio", "tmp"]`
-- `audio.waveform_cache_dir = "tmp/waveform-cache"`
+- `audio.asset_directories = ["data/audio-library"]`
+- `audio.waveform_cache_dir = "data/waveform-cache"`
 - `audio.analysis_bucket_size = 1024`
 
 ### Install dependencies
@@ -126,7 +126,7 @@ cargo test -p voltlane-core parity_report_matches_golden_baseline
 ### Generate parity report artifact
 
 ```bash
-cargo run -p voltlane-core --bin voltlane-cli -- parity-report --output tmp/parity/report.json
+cargo run -p voltlane-core --bin voltlane-cli -- parity-report --output data/parity/report.json
 ```
 
 ### One-shot runner

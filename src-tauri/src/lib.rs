@@ -257,7 +257,7 @@ fn scan_audio_assets(
             .asset_directories
             .first()
             .map(|path| resolve_dev_path(path).display().to_string())
-            .unwrap_or_else(|| "tmp/audio".to_string())
+            .unwrap_or_else(|| "data/audio-library".to_string())
     });
 
     let engine = state.engine.lock();
@@ -557,12 +557,10 @@ fn resolve_dev_path(path: &Path) -> PathBuf {
         return path.to_path_buf();
     }
 
-    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .map_or_else(
-            || PathBuf::from(env!("CARGO_MANIFEST_DIR")),
-            Path::to_path_buf,
-        );
+    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().map_or_else(
+        || PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+        Path::to_path_buf,
+    );
     workspace_root.join(path)
 }
 

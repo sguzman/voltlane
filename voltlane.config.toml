@@ -10,8 +10,8 @@ default_soundfont_path = "src-tauri/res/soundfonts/piano.sf2"
 default_soundfont_license_path = "src-tauri/res/soundfonts/piano.sf2.LICENSE"
 
 [audio]
-asset_directories = ["tmp/audio", "tmp"]
-waveform_cache_dir = "tmp/waveform-cache"
+asset_directories = ["data/audio-library"]
+waveform_cache_dir = "data/waveform-cache"
 analysis_bucket_size = 1024
 default_import_clip_name = "Audio Clip"
 default_gain_db = 0.0
@@ -32,8 +32,8 @@ tauri_log_file = true
 
 [paths]
 dev_logs_dir = "logs"
-dev_autosave_dir = "tmp/autosave"
-dev_export_dir = "tmp/out"
+dev_autosave_dir = "data/autosave"
+dev_export_dir = "data/exports"
 
 [wayland]
 enable_workarounds = true

@@ -24,14 +24,14 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Commands {
     DemoExport {
-        #[arg(long, default_value = "tmp/out")]
+        #[arg(long, default_value = "data/exports")]
         output_dir: PathBuf,
 
         #[arg(long, value_enum, default_value = "all")]
         format: DemoFormat,
     },
     ParityReport {
-        #[arg(long, default_value = "tmp/parity/report.json")]
+        #[arg(long, default_value = "data/parity/report.json")]
         output: PathBuf,
     },
 }

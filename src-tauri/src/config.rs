@@ -143,8 +143,8 @@ impl Default for TransportConfig {
 impl Default for AudioConfig {
     fn default() -> Self {
         Self {
-            asset_directories: vec![PathBuf::from("tmp/audio"), PathBuf::from("tmp")],
-            waveform_cache_dir: PathBuf::from("tmp/waveform-cache"),
+            asset_directories: vec![PathBuf::from("data/audio-library")],
+            waveform_cache_dir: PathBuf::from("data/waveform-cache"),
             analysis_bucket_size: 1024,
             default_import_clip_name: "Audio Clip".to_string(),
             default_gain_db: 0.0,
@@ -171,8 +171,8 @@ impl Default for PathsConfig {
     fn default() -> Self {
         Self {
             dev_logs_dir: PathBuf::from("logs"),
-            dev_autosave_dir: PathBuf::from("tmp/autosave"),
-            dev_export_dir: PathBuf::from("tmp/out"),
+            dev_autosave_dir: PathBuf::from("data/autosave"),
+            dev_export_dir: PathBuf::from("data/exports"),
         }
     }
 }

@@ -282,7 +282,7 @@ async function invokeMock<T>(command: string, args?: Record<string, unknown>): P
 
     case "scan_audio_assets": {
       const input = args?.input as ScanAudioAssetsInput | undefined;
-      const directory = input?.directory ?? "tmp/audio";
+      const directory = input?.directory ?? "data/audio-library";
       const assets: AudioAssetEntry[] = [
         {
           path: `${directory}/drums/kick.wav`,

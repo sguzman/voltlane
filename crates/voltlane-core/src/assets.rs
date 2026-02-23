@@ -205,8 +205,22 @@ pub fn decode_audio_file_mono(path: &Path) -> Result<DecodedAudio> {
 #[instrument(fields(directory = %directory.display()))]
 pub fn scan_audio_assets(directory: &Path) -> Result<Vec<AudioAssetEntry>> {
     if !directory.exists() {
+        fs::create_dir_all(directory).with_context(|| {
+            format!(
+                "failed to create audio asset directory: {}",
+                directory.display()
+            )
+        })?;
+        debug!(
+            directory = %directory.display(),
+            "audio asset directory missing, created empty directory"
+        );
+        return Ok(Vec::new());
+    }
+
+    if !directory.is_dir() {
         return Err(anyhow::anyhow!(
-            "audio asset directory does not exist: {}",
+            "audio asset path is not a directory: {}",
             directory.display()
         ));
     }

@@ -51,7 +51,7 @@ export function AudioBrowserPanel({
         <input
           value={scanDirectory}
           onChange={(event) => setScanDirectory(event.target.value)}
-          placeholder="tmp/audio"
+          placeholder="data/audio-library"
         />
       </label>
       <button type="button" className="pill" disabled={loading} onClick={() => onScan(scanDirectory)}>

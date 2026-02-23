@@ -70,3 +70,14 @@ fn decode_and_scan_audio_assets() {
     assert_eq!(assets.len(), 1);
     assert!(assets[0].path.ends_with("tone.wav"));
 }
+
+#[test]
+fn scan_creates_missing_audio_directory_and_returns_empty_list() {
+    let temp = tempdir().expect("tempdir should be creatable");
+    let missing = temp.path().join("missing-audio-library");
+    assert!(!missing.exists());
+
+    let assets = scan_audio_assets(&missing).expect("scan should create missing directory");
+    assert!(assets.is_empty());
+    assert!(missing.is_dir());
+}

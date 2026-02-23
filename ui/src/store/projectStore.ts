@@ -151,11 +151,11 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   parity: null,
   loading: false,
   error: null,
-  outputRoot: "tmp/out",
+  outputRoot: "data/exports",
   selectedTrackId: null,
   selectedClipId: null,
   audioAssets: [],
-  audioScanDirectory: "tmp/audio",
+  audioScanDirectory: "data/audio-library",
   selectedAudioAssetPath: null,
   audioPreview: null,
 
@@ -484,7 +484,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
 
   runAutosave: async () => {
     await withErrorHandling(set, async () => {
-      await autosaveProject("tmp/autosave");
+      await autosaveProject("data/autosave");
       logger.info("autosave completed");
     });
   },
