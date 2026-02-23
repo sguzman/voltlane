@@ -1,0 +1,24 @@
+[package]
+name = "voltlane-tauri"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[lib]
+name = "voltlane_tauri_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[dependencies]
+anyhow = "1.0.102"
+parking_lot = "0.12.5"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+tauri = "2.10.2"
+tauri-plugin-log = "2.8.0"
+tracing = "0.1.44"
+uuid = "1.21.0"
+voltlane-core = { path = "../crates/voltlane-core" }
+
+[build-dependencies]
+tauri-build = "2.5.5"

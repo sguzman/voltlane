@@ -1,6 +1,13 @@
-[package]
-name = "voltlane"
-version = "0.1.0"
-edition = "2024"
+[workspace]
+members = ["crates/voltlane-core", "src-tauri"]
+resolver = "2"
 
-[dependencies]
+[workspace.package]
+edition = "2024"
+license = "MIT"
+authors = ["voltlane contributors"]
+repository = "https://example.com/voltlane"
+
+[workspace.lints.clippy]
+all = "warn"
+pedantic = "warn"

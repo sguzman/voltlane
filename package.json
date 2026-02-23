@@ -1,0 +1,16 @@
+{
+  "name": "voltlane",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "ui:dev": "npm --prefix ui run dev",
+    "ui:build": "npm --prefix ui run build",
+    "ui:preview": "npm --prefix ui run preview",
+    "tauri": "tauri",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "latest"
+  }
+}

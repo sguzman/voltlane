@@ -1,2 +1,11 @@
 /target
-tmp
+/tmp
+/node_modules
+/ui/node_modules
+/ui/dist
+/src-tauri/target
+/src-tauri/gen
+/logs
+*.tsbuildinfo
+.DS_Store
+*.log

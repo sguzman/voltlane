@@ -1,0 +1,24 @@
+[package]
+name = "voltlane-core"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+anyhow = "1.0.102"
+chrono = { version = "0.4.43", features = ["serde"] }
+clap = { version = "4.5.60", features = ["derive"] }
+hound = "3.5.1"
+midly = "0.5.3"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+sha2 = "0.10.9"
+tempfile = "3.25.0"
+thiserror = "2.0.18"
+tracing = "0.1.44"
+tracing-appender = "0.2.4"
+tracing-subscriber = { version = "0.3.22", features = ["env-filter", "json"] }
+uuid = { version = "1.21.0", features = ["serde", "v4"] }
+
+[dev-dependencies]
