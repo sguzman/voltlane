@@ -4,8 +4,8 @@
   "version": "0.1.0",
   "identifier": "com.voltlane.app",
   "build": {
-    "beforeDevCommand": "pnpm --dir ../ui run dev --host",
-    "beforeBuildCommand": "pnpm --dir ../ui run build",
+    "beforeDevCommand": "pnpm --dir ui run dev --host",
+    "beforeBuildCommand": "pnpm --dir ui run build",
     "frontendDist": "../ui/dist",
     "devUrl": "http://localhost:5173"
   },
