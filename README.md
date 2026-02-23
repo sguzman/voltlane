@@ -43,8 +43,7 @@ The current implementation targets Milestone A/B from your planning document: pr
 ### Install dependencies
 
 ```bash
-npm install
-npm --prefix ui install
+pnpm install
 ```
 
 ### Rust checks/tests
@@ -58,13 +57,13 @@ cargo test -p voltlane-core
 ### Frontend build
 
 ```bash
-npm --prefix ui run build
+pnpm --dir ui run build
 ```
 
 ### Run desktop app (dev)
 
 ```bash
-npm run tauri:dev
+pnpm run tauri:dev
 ```
 
 ## Logging

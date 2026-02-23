@@ -2,10 +2,11 @@
   "name": "voltlane",
   "private": true,
   "version": "0.1.0",
+  "packageManager": "pnpm@10.28.2",
   "scripts": {
-    "ui:dev": "npm --prefix ui run dev",
-    "ui:build": "npm --prefix ui run build",
-    "ui:preview": "npm --prefix ui run preview",
+    "ui:dev": "pnpm --dir ui run dev",
+    "ui:build": "pnpm --dir ui run build",
+    "ui:preview": "pnpm --dir ui run preview",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build"
