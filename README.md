@@ -24,6 +24,7 @@ The current implementation targets Milestone A/B from your planning document: pr
 - Extensive structured logging with `tracing` in core and bridge.
 - Tauri commands for all major operations (`project/track/clip/export/parity`).
 - React UI for playlist lanes, track controls, transport, and parity panel.
+- Clip editor panel for MIDI/pattern note editing (add/remove/update notes, quantize, transpose).
 - Deterministic parity harness:
   - golden baseline test
   - CLI parity report generation

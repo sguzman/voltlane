@@ -6,7 +6,9 @@ interface TrackLaneProps {
   track: Track;
   index: number;
   selected: boolean;
+  selectedClipId: string | null;
   onSelect: (trackId: string) => void;
+  onSelectClip: (trackId: string, clipId: string) => void;
   onToggleMute: (trackId: string, mute: boolean) => void;
   onToggleHidden: (trackId: string, hidden: boolean) => void;
   onToggleEnabled: (trackId: string, enabled: boolean) => void;
@@ -26,7 +28,9 @@ export function TrackLane({
   track,
   index,
   selected,
+  selectedClipId,
   onSelect,
+  onSelectClip,
   onToggleMute,
   onToggleHidden,
   onToggleEnabled,
@@ -87,7 +91,15 @@ export function TrackLane({
         {track.clips.map((clip) => {
           const width = Math.max(12, Math.round((clip.length_ticks / 1_920) * 100));
           return (
-            <div key={clip.id} className={`clip ${clip.disabled ? "clip--disabled" : ""}`} style={{ width: `${width}%` }}>
+            <div
+              key={clip.id}
+              className={`clip ${clip.disabled ? "clip--disabled" : ""} ${selectedClipId === clip.id ? "clip--selected" : ""}`}
+              style={{ width: `${width}%` }}
+              onClick={(event) => {
+                event.stopPropagation();
+                onSelectClip(track.id, clip.id);
+              }}
+            >
               <span>{clip.name}</span>
             </div>
           );

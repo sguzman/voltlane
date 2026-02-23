@@ -1,10 +1,12 @@
+import { useEffect, useState } from "react";
+
 import type { Project } from "../types";
 
 interface TransportBarProps {
   project: Project;
   loading: boolean;
   onPlay: (isPlaying: boolean) => void;
-  onLoopToggle: (enabled: boolean) => void;
+  onLoopToggle: (enabled: boolean, loopStartTick?: number, loopEndTick?: number) => void;
   onExport: (kind: "midi" | "wav" | "mp3") => void;
   onAutosave: () => void;
   onSave: () => void;
@@ -22,6 +24,13 @@ export function TransportBar({
   onLoad
 }: TransportBarProps) {
   const playing = project.transport.is_playing;
+  const [loopStartTick, setLoopStartTick] = useState(project.transport.loop_start_tick);
+  const [loopEndTick, setLoopEndTick] = useState(project.transport.loop_end_tick);
+
+  useEffect(() => {
+    setLoopStartTick(project.transport.loop_start_tick);
+    setLoopEndTick(project.transport.loop_end_tick);
+  }, [project.transport.loop_start_tick, project.transport.loop_end_tick]);
 
   return (
     <header className="transport">
@@ -42,10 +51,40 @@ export function TransportBar({
         <button
           type="button"
           className={`pill ${project.transport.loop_enabled ? "pill--active" : ""}`}
-          onClick={() => onLoopToggle(!project.transport.loop_enabled)}
+          onClick={() =>
+            onLoopToggle(!project.transport.loop_enabled, loopStartTick, loopEndTick)
+          }
           disabled={loading}
         >
           Loop
+        </button>
+        <label className="transport__field">
+          <span>Loop Start</span>
+          <input
+            type="number"
+            value={loopStartTick}
+            min={0}
+            step={120}
+            onChange={(event) => setLoopStartTick(Number(event.target.value))}
+          />
+        </label>
+        <label className="transport__field">
+          <span>Loop End</span>
+          <input
+            type="number"
+            value={loopEndTick}
+            min={1}
+            step={120}
+            onChange={(event) => setLoopEndTick(Number(event.target.value))}
+          />
+        </label>
+        <button
+          type="button"
+          className="pill"
+          onClick={() => onLoopToggle(project.transport.loop_enabled, loopStartTick, loopEndTick)}
+          disabled={loading}
+        >
+          Apply Loop
         </button>
         <span className="transport__meta">BPM {project.bpm.toFixed(1)}</span>
         <span className="transport__meta">SR {project.sample_rate}Hz</span>

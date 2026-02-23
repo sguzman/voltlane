@@ -91,10 +91,26 @@ input {
   font-size: 0.82rem;
 }
 
+.transport__field {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.transport__field input {
+  width: 6.25rem;
+  border: 1px solid var(--line);
+  border-radius: 0.5rem;
+  padding: 0.3rem 0.45rem;
+  background: #fff;
+}
+
 .workspace {
   margin-top: 1rem;
   display: grid;
-  grid-template-columns: 290px 1fr 300px;
+  grid-template-columns: 290px minmax(0, 1fr) 340px 300px;
   gap: 1rem;
 }
 
@@ -273,6 +289,54 @@ input {
   opacity: 0.45;
 }
 
+.clip--selected {
+  border-color: color-mix(in srgb, var(--accent) 54%, var(--line));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent);
+}
+
+.panel--clip-editor {
+  align-self: start;
+}
+
+.clip-editor__subtitle {
+  margin-top: -0.4rem;
+  margin-bottom: 0.7rem;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.clip-editor__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-bottom: 0.55rem;
+}
+
+.clip-editor__table-wrap {
+  overflow-x: auto;
+}
+
+.clip-editor__table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8rem;
+}
+
+.clip-editor__table th,
+.clip-editor__table td {
+  border-bottom: 1px solid var(--line);
+  padding: 0.3rem 0.25rem;
+  text-align: left;
+}
+
+.clip-editor__table input {
+  width: 100%;
+  min-width: 4rem;
+  border: 1px solid var(--line);
+  border-radius: 0.4rem;
+  padding: 0.2rem 0.3rem;
+}
+
 .panel--parity {
   align-self: start;
 }
@@ -383,6 +447,7 @@ input {
     grid-template-columns: 260px 1fr;
   }
 
+  .panel--clip-editor,
   .panel--parity {
     grid-column: 1 / -1;
   }
@@ -398,6 +463,7 @@ input {
   }
 
   .panel--controls,
+  .panel--clip-editor,
   .panel--parity {
     order: 2;
   }

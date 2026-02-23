@@ -113,6 +113,43 @@ export interface AddMidiClipInput {
   notes: MidiNote[];
 }
 
+export interface MoveClipInput {
+  track_id: string;
+  clip_id: string;
+  start_tick: number;
+  length_ticks: number;
+}
+
+export interface UpdateClipNotesInput {
+  track_id: string;
+  clip_id: string;
+  notes: MidiNote[];
+}
+
+export interface AddClipNoteInput {
+  track_id: string;
+  clip_id: string;
+  note: MidiNote;
+}
+
+export interface RemoveClipNoteInput {
+  track_id: string;
+  clip_id: string;
+  note_index: number;
+}
+
+export interface TransposeClipNotesInput {
+  track_id: string;
+  clip_id: string;
+  semitones: number;
+}
+
+export interface QuantizeClipNotesInput {
+  track_id: string;
+  clip_id: string;
+  grid_ticks: number;
+}
+
 export type ExportKind = "midi" | "wav" | "mp3";
 
 export interface ExportProjectInput {

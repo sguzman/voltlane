@@ -2,28 +2,27 @@ import { invoke } from "@tauri-apps/api/core";
 
 import { logger } from "../lib/logger";
 import type {
+  AddClipNoteInput,
   AddMidiClipInput,
   AddTrackRequest,
   Clip,
   ExportProjectInput,
+  MoveClipInput,
+  QuantizeClipNotesInput,
   ParityReport,
   PatchTrackInput,
   Project,
+  RemoveClipNoteInput,
   Track,
-  TrackKind
+  TrackKind,
+  TransposeClipNotesInput,
+  UpdateClipNotesInput
 } from "../types";
 
 interface CreateProjectInput {
   title: string;
   bpm?: number;
   sample_rate?: number;
-}
-
-interface MoveClipInput {
-  track_id: string;
-  clip_id: string;
-  start_tick: number;
-  length_ticks: number;
 }
 
 interface AddEffectInput {
@@ -140,6 +139,44 @@ function synthParity(project: Project): ParityReport {
   };
 }
 
+function getClipRefs(project: Project, trackId: string, clipId: string): { track: Track; clip: Clip } {
+  const track = project.tracks.find((candidate) => candidate.id === trackId);
+  if (!track) {
+    throw new Error(`track not found: ${trackId}`);
+  }
+
+  const clip = track.clips.find((candidate) => candidate.id === clipId);
+  if (!clip) {
+    throw new Error(`clip not found: ${clipId}`);
+  }
+
+  return { track, clip };
+}
+
+function isNoteClip(clip: Clip): clip is Clip & ({ payload: { midi: { notes: UpdateClipNotesInput["notes"] } } } | { payload: { pattern: { notes: UpdateClipNotesInput["notes"] } } }) {
+  return "midi" in clip.payload || "pattern" in clip.payload;
+}
+
+function noteListFromClip(clip: Clip): UpdateClipNotesInput["notes"] {
+  if ("midi" in clip.payload) {
+    return clip.payload.midi.notes;
+  }
+  if ("pattern" in clip.payload) {
+    return clip.payload.pattern.notes;
+  }
+  throw new Error(`clip payload is not midi/pattern: ${clip.id}`);
+}
+
+function clampNote(value: UpdateClipNotesInput["notes"][number]): UpdateClipNotesInput["notes"][number] {
+  return {
+    pitch: Math.max(0, Math.min(127, Math.round(value.pitch))),
+    velocity: Math.max(0, Math.min(127, Math.round(value.velocity))),
+    start_tick: Math.max(0, Math.round(value.start_tick)),
+    length_ticks: Math.max(1, Math.round(value.length_ticks)),
+    channel: Math.max(0, Math.min(15, Math.round(value.channel)))
+  };
+}
+
 async function invokeMock<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   logger.debug(`mock invoke ${command}`, args);
 
@@ -212,14 +249,90 @@ async function invokeMock<T>(command: string, args?: Record<string, unknown>): P
 
     case "move_clip": {
       const input = args?.input as MoveClipInput;
-      const track = mockProject.tracks.find((candidate) => candidate.id === input.track_id);
-      const clip = track?.clips.find((candidate) => candidate.id === input.clip_id);
-      if (!clip) {
-        throw new Error(`clip not found: ${input.clip_id}`);
-      }
+      const { clip } = getClipRefs(mockProject, input.track_id, input.clip_id);
 
       clip.start_tick = input.start_tick;
       clip.length_ticks = input.length_ticks;
+      touchProject();
+      return mockProject as T;
+    }
+
+    case "update_clip_notes": {
+      const input = args?.input as UpdateClipNotesInput;
+      const { clip } = getClipRefs(mockProject, input.track_id, input.clip_id);
+      if (!isNoteClip(clip)) {
+        throw new Error(`clip payload is not midi/pattern: ${input.clip_id}`);
+      }
+
+      const notes = input.notes.map(clampNote);
+      if ("midi" in clip.payload) {
+        clip.payload.midi.notes = notes;
+      } else {
+        clip.payload.pattern.notes = notes;
+      }
+
+      touchProject();
+      return mockProject as T;
+    }
+
+    case "add_clip_note": {
+      const input = args?.input as AddClipNoteInput;
+      const { clip } = getClipRefs(mockProject, input.track_id, input.clip_id);
+      if (!isNoteClip(clip)) {
+        throw new Error(`clip payload is not midi/pattern: ${input.clip_id}`);
+      }
+      const note = clampNote(input.note);
+      noteListFromClip(clip).push(note);
+      noteListFromClip(clip).sort((left, right) => left.start_tick - right.start_tick);
+      touchProject();
+      return mockProject as T;
+    }
+
+    case "remove_clip_note": {
+      const input = args?.input as RemoveClipNoteInput;
+      const { clip } = getClipRefs(mockProject, input.track_id, input.clip_id);
+      if (!isNoteClip(clip)) {
+        throw new Error(`clip payload is not midi/pattern: ${input.clip_id}`);
+      }
+      const notes = noteListFromClip(clip);
+      if (input.note_index < 0 || input.note_index >= notes.length) {
+        throw new Error(`invalid note index: ${input.note_index}`);
+      }
+      notes.splice(input.note_index, 1);
+      touchProject();
+      return mockProject as T;
+    }
+
+    case "transpose_clip_notes": {
+      const input = args?.input as TransposeClipNotesInput;
+      const { clip } = getClipRefs(mockProject, input.track_id, input.clip_id);
+      if (!isNoteClip(clip)) {
+        throw new Error(`clip payload is not midi/pattern: ${input.clip_id}`);
+      }
+      const notes = noteListFromClip(clip);
+      for (const note of notes) {
+        note.pitch = Math.max(0, Math.min(127, Math.round(note.pitch + input.semitones)));
+      }
+      touchProject();
+      return mockProject as T;
+    }
+
+    case "quantize_clip_notes": {
+      const input = args?.input as QuantizeClipNotesInput;
+      const { clip } = getClipRefs(mockProject, input.track_id, input.clip_id);
+      if (!isNoteClip(clip)) {
+        throw new Error(`clip payload is not midi/pattern: ${input.clip_id}`);
+      }
+      if (input.grid_ticks <= 0) {
+        throw new Error(`invalid grid_ticks: ${input.grid_ticks}`);
+      }
+      const grid = Math.round(input.grid_ticks);
+      const notes = noteListFromClip(clip);
+      for (const note of notes) {
+        note.start_tick = Math.max(0, Math.round(note.start_tick / grid) * grid);
+        note.length_ticks = Math.max(grid, Math.round(note.length_ticks / grid) * grid);
+      }
+      notes.sort((left, right) => left.start_tick - right.start_tick);
       touchProject();
       return mockProject as T;
     }
@@ -325,6 +438,26 @@ export async function addMidiClip(input: AddMidiClipInput): Promise<Project> {
 
 export async function moveClip(input: MoveClipInput): Promise<Project> {
   return invokeCommand<Project>("move_clip", { input });
+}
+
+export async function updateClipNotes(input: UpdateClipNotesInput): Promise<Project> {
+  return invokeCommand<Project>("update_clip_notes", { input });
+}
+
+export async function addClipNote(input: AddClipNoteInput): Promise<Project> {
+  return invokeCommand<Project>("add_clip_note", { input });
+}
+
+export async function removeClipNote(input: RemoveClipNoteInput): Promise<Project> {
+  return invokeCommand<Project>("remove_clip_note", { input });
+}
+
+export async function transposeClipNotes(input: TransposeClipNotesInput): Promise<Project> {
+  return invokeCommand<Project>("transpose_clip_notes", { input });
+}
+
+export async function quantizeClipNotes(input: QuantizeClipNotesInput): Promise<Project> {
+  return invokeCommand<Project>("quantize_clip_notes", { input });
 }
 
 export async function addEffect(input: AddEffectInput): Promise<Project> {

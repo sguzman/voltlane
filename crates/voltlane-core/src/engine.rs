@@ -7,7 +7,9 @@ use uuid::Uuid;
 
 use crate::{
     export,
-    model::{Clip, ClipPayload, DEFAULT_SAMPLE_RATE, EffectSpec, Project, Track, TrackKind},
+    model::{
+        Clip, ClipPayload, DEFAULT_SAMPLE_RATE, EffectSpec, MidiNote, Project, Track, TrackKind,
+    },
     persistence,
 };
 
@@ -17,6 +19,12 @@ pub enum EngineError {
     TrackNotFound(Uuid),
     #[error("clip not found: {0}")]
     ClipNotFound(Uuid),
+    #[error("clip does not support midi note editing: {0}")]
+    UnsupportedClipPayload(Uuid),
+    #[error("invalid quantize grid ticks: {0}")]
+    InvalidQuantizeGrid(u64),
+    #[error("invalid note index: {0}")]
+    InvalidNoteIndex(usize),
     #[error("invalid reorder from {from} to {to}")]
     InvalidReorder { from: usize, to: usize },
     #[error("io error: {0}")]
@@ -258,6 +266,132 @@ impl Engine {
         Ok(updated_clip)
     }
 
+    #[instrument(skip(self, notes), fields(project_id = %self.project.id, track_id = %track_id, clip_id = %clip_id, notes = notes.len()))]
+    pub fn upsert_clip_notes(
+        &mut self,
+        track_id: Uuid,
+        clip_id: Uuid,
+        mut notes: Vec<MidiNote>,
+    ) -> Result<Clip, EngineError> {
+        for note in &mut notes {
+            sanitize_note(note);
+        }
+
+        let updated_clip = {
+            let clip = self.find_clip_mut(track_id, clip_id)?;
+            let target =
+                clip_note_vec_mut(clip).ok_or(EngineError::UnsupportedClipPayload(clip_id))?;
+            *target = notes;
+            clip.clone()
+        };
+
+        self.project.touch();
+        info!("clip notes replaced");
+        Ok(updated_clip)
+    }
+
+    #[instrument(skip(self, note), fields(project_id = %self.project.id, track_id = %track_id, clip_id = %clip_id))]
+    pub fn add_clip_note(
+        &mut self,
+        track_id: Uuid,
+        clip_id: Uuid,
+        mut note: MidiNote,
+    ) -> Result<Clip, EngineError> {
+        sanitize_note(&mut note);
+
+        let updated_clip = {
+            let clip = self.find_clip_mut(track_id, clip_id)?;
+            let notes =
+                clip_note_vec_mut(clip).ok_or(EngineError::UnsupportedClipPayload(clip_id))?;
+            notes.push(note);
+            notes.sort_by_key(|candidate| candidate.start_tick);
+            clip.clone()
+        };
+
+        self.project.touch();
+        info!("note added to clip");
+        Ok(updated_clip)
+    }
+
+    #[instrument(skip(self), fields(project_id = %self.project.id, track_id = %track_id, clip_id = %clip_id, note_index))]
+    pub fn remove_clip_note(
+        &mut self,
+        track_id: Uuid,
+        clip_id: Uuid,
+        note_index: usize,
+    ) -> Result<Clip, EngineError> {
+        let updated_clip = {
+            let clip = self.find_clip_mut(track_id, clip_id)?;
+            let notes =
+                clip_note_vec_mut(clip).ok_or(EngineError::UnsupportedClipPayload(clip_id))?;
+            if note_index >= notes.len() {
+                return Err(EngineError::InvalidNoteIndex(note_index));
+            }
+            notes.remove(note_index);
+            clip.clone()
+        };
+
+        self.project.touch();
+        info!("note removed from clip");
+        Ok(updated_clip)
+    }
+
+    #[instrument(skip(self), fields(project_id = %self.project.id, track_id = %track_id, clip_id = %clip_id, semitones))]
+    pub fn transpose_clip_notes(
+        &mut self,
+        track_id: Uuid,
+        clip_id: Uuid,
+        semitones: i16,
+    ) -> Result<Clip, EngineError> {
+        let updated_clip = {
+            let clip = self.find_clip_mut(track_id, clip_id)?;
+            let notes =
+                clip_note_vec_mut(clip).ok_or(EngineError::UnsupportedClipPayload(clip_id))?;
+            for note in notes {
+                let pitch = i16::from(note.pitch)
+                    .saturating_add(semitones)
+                    .clamp(0, 127) as u8;
+                note.pitch = pitch;
+            }
+            clip.clone()
+        };
+
+        self.project.touch();
+        info!("clip notes transposed");
+        Ok(updated_clip)
+    }
+
+    #[instrument(skip(self), fields(project_id = %self.project.id, track_id = %track_id, clip_id = %clip_id, grid_ticks))]
+    pub fn quantize_clip_notes(
+        &mut self,
+        track_id: Uuid,
+        clip_id: Uuid,
+        grid_ticks: u64,
+    ) -> Result<Clip, EngineError> {
+        if grid_ticks == 0 {
+            return Err(EngineError::InvalidQuantizeGrid(grid_ticks));
+        }
+
+        let updated_clip = {
+            let clip = self.find_clip_mut(track_id, clip_id)?;
+            let notes =
+                clip_note_vec_mut(clip).ok_or(EngineError::UnsupportedClipPayload(clip_id))?;
+
+            for note in notes.iter_mut() {
+                note.start_tick = round_to_grid(note.start_tick, grid_ticks);
+                note.length_ticks =
+                    round_to_grid(note.length_ticks.max(1), grid_ticks).max(grid_ticks);
+                sanitize_note(note);
+            }
+            notes.sort_by_key(|candidate| candidate.start_tick);
+            clip.clone()
+        };
+
+        self.project.touch();
+        info!("clip notes quantized");
+        Ok(updated_clip)
+    }
+
     #[instrument(skip(self), fields(project_id = %self.project.id))]
     pub fn toggle_playback(&mut self, is_playing: bool) {
         self.project.transport.is_playing = is_playing;
@@ -317,4 +451,38 @@ impl Engine {
         }
         Ok(())
     }
+
+    fn find_clip_mut(&mut self, track_id: Uuid, clip_id: Uuid) -> Result<&mut Clip, EngineError> {
+        let track = self
+            .project
+            .tracks
+            .iter_mut()
+            .find(|track| track.id == track_id)
+            .ok_or(EngineError::TrackNotFound(track_id))?;
+
+        track
+            .clips
+            .iter_mut()
+            .find(|clip| clip.id == clip_id)
+            .ok_or(EngineError::ClipNotFound(clip_id))
+    }
+}
+
+fn clip_note_vec_mut(clip: &mut Clip) -> Option<&mut Vec<MidiNote>> {
+    match &mut clip.payload {
+        ClipPayload::Midi(midi) => Some(&mut midi.notes),
+        ClipPayload::Pattern(pattern) => Some(&mut pattern.notes),
+        ClipPayload::Audio(_) | ClipPayload::Automation(_) => None,
+    }
+}
+
+fn sanitize_note(note: &mut MidiNote) {
+    note.pitch = note.pitch.min(127);
+    note.velocity = note.velocity.min(127);
+    note.channel = note.channel.min(15);
+    note.length_ticks = note.length_ticks.max(1);
+}
+
+fn round_to_grid(value: u64, grid: u64) -> u64 {
+    ((value.saturating_add(grid / 2)) / grid) * grid
 }

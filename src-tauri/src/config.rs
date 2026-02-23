@@ -171,8 +171,7 @@ impl Default for ExportConfig {
 impl AppConfig {
     pub fn load() -> Result<Self> {
         let config_path = discover_config_path().with_context(|| {
-            "failed to locate voltlane.config.toml; looked in cwd and parent directory"
-                .to_string()
+            "failed to locate voltlane.config.toml; looked in cwd and parent directory".to_string()
         })?;
 
         let content = fs::read_to_string(&config_path)

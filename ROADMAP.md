@@ -24,8 +24,8 @@
 - [x] Basic clip visualization in playlist
 - [x] Effect attachment primitives per track
 - [ ] Full piano roll editor with note drag/resize
-- [ ] Quantize/transpose tools
-- [ ] Marker and loop-region editor UI
+- [x] Quantize/transpose tools
+- [x] Marker and loop-region editor UI
 
 ## Phase 3: Audio Clip Workflow
 

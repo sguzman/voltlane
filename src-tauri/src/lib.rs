@@ -69,6 +69,41 @@ struct MoveClipInput {
 }
 
 #[derive(Debug, Deserialize)]
+struct UpdateClipNotesInput {
+    track_id: String,
+    clip_id: String,
+    notes: Vec<MidiNote>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AddClipNoteInput {
+    track_id: String,
+    clip_id: String,
+    note: MidiNote,
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoveClipNoteInput {
+    track_id: String,
+    clip_id: String,
+    note_index: usize,
+}
+
+#[derive(Debug, Deserialize)]
+struct TransposeClipNotesInput {
+    track_id: String,
+    clip_id: String,
+    semitones: i16,
+}
+
+#[derive(Debug, Deserialize)]
+struct QuantizeClipNotesInput {
+    track_id: String,
+    clip_id: String,
+    grid_ticks: u64,
+}
+
+#[derive(Debug, Deserialize)]
 struct ExportProjectInput {
     kind: ExportKind,
     output_path: String,
@@ -180,6 +215,83 @@ fn move_clip(state: State<'_, AppState>, input: MoveClipInput) -> Result<Project
     let mut engine = state.engine.lock();
     engine
         .move_clip(track_id, clip_id, input.start_tick, input.length_ticks)
+        .map_err(|error| error.to_string())?;
+
+    Ok(engine.project().clone())
+}
+
+#[instrument(skip(state, input))]
+#[tauri::command]
+fn update_clip_notes(
+    state: State<'_, AppState>,
+    input: UpdateClipNotesInput,
+) -> Result<Project, String> {
+    let track_id = parse_uuid(&input.track_id)?;
+    let clip_id = parse_uuid(&input.clip_id)?;
+    let mut engine = state.engine.lock();
+    engine
+        .upsert_clip_notes(track_id, clip_id, input.notes)
+        .map_err(|error| error.to_string())?;
+
+    Ok(engine.project().clone())
+}
+
+#[instrument(skip(state, input))]
+#[tauri::command]
+fn add_clip_note(state: State<'_, AppState>, input: AddClipNoteInput) -> Result<Project, String> {
+    let track_id = parse_uuid(&input.track_id)?;
+    let clip_id = parse_uuid(&input.clip_id)?;
+    let mut engine = state.engine.lock();
+    engine
+        .add_clip_note(track_id, clip_id, input.note)
+        .map_err(|error| error.to_string())?;
+
+    Ok(engine.project().clone())
+}
+
+#[instrument(skip(state, input))]
+#[tauri::command]
+fn remove_clip_note(
+    state: State<'_, AppState>,
+    input: RemoveClipNoteInput,
+) -> Result<Project, String> {
+    let track_id = parse_uuid(&input.track_id)?;
+    let clip_id = parse_uuid(&input.clip_id)?;
+    let mut engine = state.engine.lock();
+    engine
+        .remove_clip_note(track_id, clip_id, input.note_index)
+        .map_err(|error| error.to_string())?;
+
+    Ok(engine.project().clone())
+}
+
+#[instrument(skip(state, input))]
+#[tauri::command]
+fn transpose_clip_notes(
+    state: State<'_, AppState>,
+    input: TransposeClipNotesInput,
+) -> Result<Project, String> {
+    let track_id = parse_uuid(&input.track_id)?;
+    let clip_id = parse_uuid(&input.clip_id)?;
+    let mut engine = state.engine.lock();
+    engine
+        .transpose_clip_notes(track_id, clip_id, input.semitones)
+        .map_err(|error| error.to_string())?;
+
+    Ok(engine.project().clone())
+}
+
+#[instrument(skip(state, input))]
+#[tauri::command]
+fn quantize_clip_notes(
+    state: State<'_, AppState>,
+    input: QuantizeClipNotesInput,
+) -> Result<Project, String> {
+    let track_id = parse_uuid(&input.track_id)?;
+    let clip_id = parse_uuid(&input.clip_id)?;
+    let mut engine = state.engine.lock();
+    engine
+        .quantize_clip_notes(track_id, clip_id, input.grid_ticks)
         .map_err(|error| error.to_string())?;
 
     Ok(engine.project().clone())
@@ -411,6 +523,11 @@ pub fn run() {
             reorder_track,
             add_midi_clip,
             move_clip,
+            update_clip_notes,
+            add_clip_note,
+            remove_clip_note,
+            transpose_clip_notes,
+            quantize_clip_notes,
             add_effect,
             set_playback,
             set_loop_region,

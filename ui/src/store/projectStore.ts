@@ -1,6 +1,7 @@
 import { create } from "zustand";
 
 import {
+  addClipNote,
   addEffect,
   addMidiClip,
   addTrack,
@@ -10,14 +11,19 @@ import {
   getProject,
   loadProject,
   measureParity,
+  moveClip,
   patchTrackState,
+  quantizeClipNotes,
   reorderTrack,
+  removeClipNote,
   saveProject,
   setLoopRegion,
-  setPlayback
+  setPlayback,
+  transposeClipNotes,
+  updateClipNotes
 } from "../api/tauri";
 import { logger } from "../lib/logger";
-import type { ExportKind, ParityReport, Project, TrackKind } from "../types";
+import type { ExportKind, MidiNote, ParityReport, Project, TrackKind } from "../types";
 
 const TRACK_COLORS = [
   "#20d0ba",
@@ -35,6 +41,7 @@ interface ProjectStore {
   error: string | null;
   outputRoot: string;
   selectedTrackId: string | null;
+  selectedClipId: string | null;
   bootstrap: () => Promise<void>;
   createNewProject: (title: string) => Promise<void>;
   addTrackByKind: (kind: TrackKind) => Promise<void>;
@@ -46,7 +53,18 @@ interface ProjectStore {
   addBasicEffect: (trackId: string, effectName: string) => Promise<void>;
   shiftTrack: (index: number, direction: "up" | "down") => Promise<void>;
   setPlaybackState: (isPlaying: boolean) => Promise<void>;
-  configureLoop: (enabled: boolean) => Promise<void>;
+  configureLoop: (enabled: boolean, loopStartTick?: number, loopEndTick?: number) => Promise<void>;
+  moveClipTiming: (
+    trackId: string,
+    clipId: string,
+    startTick: number,
+    lengthTicks: number
+  ) => Promise<void>;
+  addNoteToClip: (trackId: string, clipId: string, note: MidiNote) => Promise<void>;
+  removeNoteAt: (trackId: string, clipId: string, noteIndex: number) => Promise<void>;
+  replaceClipNotes: (trackId: string, clipId: string, notes: MidiNote[]) => Promise<void>;
+  transposeClip: (trackId: string, clipId: string, semitones: number) => Promise<void>;
+  quantizeClip: (trackId: string, clipId: string, gridTicks: number) => Promise<void>;
   runExport: (kind: ExportKind) => Promise<void>;
   saveCurrentProject: () => Promise<void>;
   loadCurrentProject: () => Promise<void>;
@@ -54,6 +72,7 @@ interface ProjectStore {
   refreshParity: () => Promise<void>;
   clearError: () => void;
   setSelectedTrack: (trackId: string | null) => void;
+  setSelectedClip: (clipId: string | null) => void;
 }
 
 function nextTrackName(project: Project | null, kind: TrackKind): string {
@@ -101,12 +120,17 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   error: null,
   outputRoot: "tmp/out",
   selectedTrackId: null,
+  selectedClipId: null,
 
   bootstrap: async () => {
     await withErrorHandling(set, async () => {
       logger.info("loading initial project");
       const project = await getProject();
-      set({ project, selectedTrackId: project.tracks[0]?.id ?? null });
+      set({
+        project,
+        selectedTrackId: project.tracks[0]?.id ?? null,
+        selectedClipId: project.tracks[0]?.clips[0]?.id ?? null
+      });
       await get().refreshParity();
     });
   },
@@ -114,7 +138,11 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   createNewProject: async (title) => {
     await withErrorHandling(set, async () => {
       const project = await createProject({ title, bpm: 140, sample_rate: 48_000 });
-      set({ project, selectedTrackId: project.tracks[0]?.id ?? null });
+      set({
+        project,
+        selectedTrackId: project.tracks[0]?.id ?? null,
+        selectedClipId: project.tracks[0]?.clips[0]?.id ?? null
+      });
       await get().refreshParity();
     });
   },
@@ -127,7 +155,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         color: nextTrackColor(project),
         kind
       });
-      set({ project: updated });
+      set({ project: updated, selectedTrackId: updated.tracks[updated.tracks.length - 1]?.id ?? null });
       await get().refreshParity();
     });
   },
@@ -156,7 +184,9 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
           { pitch: 72, velocity: 112, start_tick: 1_440, length_ticks: 480, channel: 0 }
         ]
       });
-      set({ project: updated });
+      const targetTrack = updated.tracks.find((candidate) => candidate.id === trackId);
+      const selectedClipId = targetTrack?.clips[targetTrack.clips.length - 1]?.id ?? null;
+      set({ project: updated, selectedTrackId: trackId, selectedClipId });
       await get().refreshParity();
     });
   },
@@ -191,10 +221,89 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     });
   },
 
-  configureLoop: async (enabled) => {
+  configureLoop: async (enabled, loopStartTick, loopEndTick) => {
     await withErrorHandling(set, async () => {
-      const updated = await setLoopRegion(0, 1_920, enabled);
+      const project = get().project;
+      if (!project) {
+        return;
+      }
+
+      const start = loopStartTick ?? project.transport.loop_start_tick;
+      const end = loopEndTick ?? project.transport.loop_end_tick;
+      const updated = await setLoopRegion(start, end, enabled);
       set({ project: updated });
+    });
+  },
+
+  moveClipTiming: async (trackId, clipId, startTick, lengthTicks) => {
+    await withErrorHandling(set, async () => {
+      const updated = await moveClip({
+        track_id: trackId,
+        clip_id: clipId,
+        start_tick: startTick,
+        length_ticks: lengthTicks
+      });
+      set({ project: updated });
+    });
+  },
+
+  addNoteToClip: async (trackId, clipId, note) => {
+    await withErrorHandling(set, async () => {
+      const updated = await addClipNote({
+        track_id: trackId,
+        clip_id: clipId,
+        note
+      });
+      set({ project: updated, selectedTrackId: trackId, selectedClipId: clipId });
+      await get().refreshParity();
+    });
+  },
+
+  removeNoteAt: async (trackId, clipId, noteIndex) => {
+    await withErrorHandling(set, async () => {
+      const updated = await removeClipNote({
+        track_id: trackId,
+        clip_id: clipId,
+        note_index: noteIndex
+      });
+      set({ project: updated, selectedTrackId: trackId, selectedClipId: clipId });
+      await get().refreshParity();
+    });
+  },
+
+  replaceClipNotes: async (trackId, clipId, notes) => {
+    await withErrorHandling(set, async () => {
+      const updated = await updateClipNotes({
+        track_id: trackId,
+        clip_id: clipId,
+        notes
+      });
+      set({ project: updated, selectedTrackId: trackId, selectedClipId: clipId });
+      await get().refreshParity();
+    });
+  },
+
+  transposeClip: async (trackId, clipId, semitones) => {
+    await withErrorHandling(set, async () => {
+      const updated = await transposeClipNotes({
+        track_id: trackId,
+        clip_id: clipId,
+        semitones
+      });
+      set({ project: updated, selectedTrackId: trackId, selectedClipId: clipId });
+      await get().refreshParity();
+    });
+  },
+
+  quantizeClip: async (trackId, clipId, gridTicks) => {
+    await withErrorHandling(set, async () => {
+      const updated = await quantizeClipNotes({
+        track_id: trackId,
+        clip_id: clipId,
+        grid_ticks: gridTicks
+      });
+      set({ project: updated, selectedTrackId: trackId, selectedClipId: clipId });
+      await get().refreshParity();
     });
   },
 
@@ -231,7 +340,11 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       const title = project?.title.replace(/\s+/g, "_").toLowerCase() ?? "voltlane_mock";
       const path = `${get().outputRoot}/${title}.voltlane.json`;
       const updated = await loadProject(path);
-      set({ project: updated, selectedTrackId: updated.tracks[0]?.id ?? null });
+      set({
+        project: updated,
+        selectedTrackId: updated.tracks[0]?.id ?? null,
+        selectedClipId: updated.tracks[0]?.clips[0]?.id ?? null
+      });
       await get().refreshParity();
     });
   },
@@ -253,5 +366,13 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   },
 
   clearError: () => set({ error: null }),
-  setSelectedTrack: (trackId) => set({ selectedTrackId: trackId })
+  setSelectedTrack: (trackId) =>
+    set((state) => {
+      const targetTrack = state.project?.tracks.find((track) => track.id === trackId) ?? null;
+      return {
+        selectedTrackId: trackId,
+        selectedClipId: targetTrack?.clips[0]?.id ?? null
+      };
+    }),
+  setSelectedClip: (clipId) => set({ selectedClipId: clipId })
 }));

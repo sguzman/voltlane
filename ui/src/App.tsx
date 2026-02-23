@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 
+import { ClipEditor } from "./components/ClipEditor";
 import { ParityPanel } from "./components/ParityPanel";
 import { TrackLane } from "./components/TrackLane";
 import { TransportBar } from "./components/TransportBar";
@@ -17,6 +18,7 @@ export default function App() {
     loading,
     error,
     selectedTrackId,
+    selectedClipId,
     bootstrap,
     createNewProject,
     addTrackByKind,
@@ -26,13 +28,20 @@ export default function App() {
     shiftTrack,
     setPlaybackState,
     configureLoop,
+    moveClipTiming,
+    addNoteToClip,
+    removeNoteAt,
+    replaceClipNotes,
+    transposeClip,
+    quantizeClip,
     runExport,
     saveCurrentProject,
     loadCurrentProject,
     runAutosave,
     refreshParity,
     clearError,
-    setSelectedTrack
+    setSelectedTrack,
+    setSelectedClip
   } = useProjectStore();
 
   useEffect(() => {
@@ -43,6 +52,13 @@ export default function App() {
     () => project?.tracks.find((track) => track.id === selectedTrackId) ?? null,
     [project, selectedTrackId]
   );
+
+  const selectedClip = useMemo(() => {
+    if (!selectedTrack) {
+      return null;
+    }
+    return selectedTrack.clips.find((clip) => clip.id === selectedClipId) ?? null;
+  }, [selectedTrack, selectedClipId]);
 
   if (!project) {
     return <main className="shell">Loading Voltlane...</main>;
@@ -56,7 +72,9 @@ export default function App() {
         project={project}
         loading={loading}
         onPlay={(isPlaying) => void setPlaybackState(isPlaying)}
-        onLoopToggle={(enabled) => void configureLoop(enabled)}
+        onLoopToggle={(enabled, loopStartTick, loopEndTick) =>
+          void configureLoop(enabled, loopStartTick, loopEndTick)
+        }
         onExport={(kind) => void runExport(kind)}
         onAutosave={() => void runAutosave()}
         onSave={() => void saveCurrentProject()}
@@ -160,7 +178,12 @@ export default function App() {
                 track={track}
                 index={index}
                 selected={track.id === selectedTrackId}
+                selectedClipId={selectedClipId}
                 onSelect={(trackId) => setSelectedTrack(trackId)}
+                onSelectClip={(trackId, clipId) => {
+                  setSelectedTrack(trackId);
+                  setSelectedClip(clipId);
+                }}
                 onToggleMute={(trackId, mute) => void setTrackFlag(trackId, { mute })}
                 onToggleHidden={(trackId, hidden) => void setTrackFlag(trackId, { hidden })}
                 onToggleEnabled={(trackId, enabled) => void setTrackFlag(trackId, { enabled })}
@@ -171,6 +194,21 @@ export default function App() {
             ))}
           </div>
         </section>
+
+        <ClipEditor
+          clip={selectedClip}
+          trackId={selectedTrackId}
+          ppq={project.ppq}
+          loading={loading}
+          onMoveClip={(trackId, clipId, startTick, lengthTicks) =>
+            void moveClipTiming(trackId, clipId, startTick, lengthTicks)
+          }
+          onAddNote={(trackId, clipId, note) => void addNoteToClip(trackId, clipId, note)}
+          onRemoveNote={(trackId, clipId, noteIndex) => void removeNoteAt(trackId, clipId, noteIndex)}
+          onReplaceNotes={(trackId, clipId, notes) => void replaceClipNotes(trackId, clipId, notes)}
+          onTranspose={(trackId, clipId, semitones) => void transposeClip(trackId, clipId, semitones)}
+          onQuantize={(trackId, clipId, gridTicks) => void quantizeClip(trackId, clipId, gridTicks)}
+        />
 
         <ParityPanel project={project} parity={parity} onRefreshParity={() => void refreshParity()} />
       </section>
