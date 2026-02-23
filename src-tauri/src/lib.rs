@@ -394,6 +394,7 @@ pub fn run() {
                 mode = ?config.mode,
                 session_id = %telemetry.session_id,
                 log_dir = %log_dir.display(),
+                default_soundfont = %config.midi.default_soundfont_path.display(),
                 "voltlane tauri setup complete"
             );
 

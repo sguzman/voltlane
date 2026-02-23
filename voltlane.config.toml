@@ -5,6 +5,10 @@ default_title = "Voltlane Session"
 default_bpm = 140.0
 default_sample_rate = 48000
 
+[midi]
+default_soundfont_path = "src-tauri/res/soundfonts/piano.sf2"
+default_soundfont_license_path = "src-tauri/res/licenses/piano.sf2.LICENSE.txt"
+
 [transport]
 default_loop_start_tick = 0
 default_loop_end_tick = 1920

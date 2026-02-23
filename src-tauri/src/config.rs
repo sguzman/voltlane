@@ -15,6 +15,7 @@ pub enum AppMode {
 pub struct AppConfig {
     pub mode: AppMode,
     pub project: ProjectConfig,
+    pub midi: MidiConfig,
     pub transport: TransportConfig,
     pub diagnostics: DiagnosticsConfig,
     pub paths: PathsConfig,
@@ -28,6 +29,13 @@ pub struct ProjectConfig {
     pub default_title: String,
     pub default_bpm: f64,
     pub default_sample_rate: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MidiConfig {
+    pub default_soundfont_path: PathBuf,
+    pub default_soundfont_license_path: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -75,6 +83,7 @@ impl Default for AppConfig {
         Self {
             mode: AppMode::Dev,
             project: ProjectConfig::default(),
+            midi: MidiConfig::default(),
             transport: TransportConfig::default(),
             diagnostics: DiagnosticsConfig::default(),
             paths: PathsConfig::default(),
@@ -90,6 +99,17 @@ impl Default for ProjectConfig {
             default_title: "Untitled".to_string(),
             default_bpm: 140.0,
             default_sample_rate: 48_000,
+        }
+    }
+}
+
+impl Default for MidiConfig {
+    fn default() -> Self {
+        Self {
+            default_soundfont_path: PathBuf::from("src-tauri/res/soundfonts/piano.sf2"),
+            default_soundfont_license_path: PathBuf::from(
+                "src-tauri/res/licenses/piano.sf2.LICENSE.txt",
+            ),
         }
     }
 }

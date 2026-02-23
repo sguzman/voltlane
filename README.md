@@ -37,6 +37,8 @@ The current implementation targets Milestone A/B from your planning document: pr
 - `ui`: React/TypeScript frontend
 - `scripts/run_parity_harness.sh`: parity harness runner
 - `ROADMAP.md`: progress tracker with checkboxes
+- `src-tauri/res/soundfonts`: bundled SoundFonts
+- `src-tauri/res/licenses`: third-party asset license records
 
 ## Build and Run
 
@@ -55,6 +57,11 @@ Current mode is set to:
 In `dev` mode, each app launch writes timestamped Rust tracing logs into:
 
 - `logs/`
+
+MIDI SoundFont defaults are configured here too:
+
+- `midi.default_soundfont_path = "src-tauri/res/soundfonts/piano.sf2"`
+- `midi.default_soundfont_license_path = "src-tauri/res/licenses/piano.sf2.LICENSE.txt"`
 
 ### Install dependencies
 
@@ -131,6 +138,12 @@ UPDATE_PARITY_BASELINE=1 cargo test -p voltlane-core parity_report_matches_golde
 
 - MP3 export requires `ffmpeg` in `PATH` unless you pass a specific binary path through Tauri command input.
 - WAV and MIDI exports are fully Rust-native in this implementation.
+
+## SoundFont Asset
+
+- Integrated SoundFont: `src-tauri/res/soundfonts/piano.sf2`
+- License record file: `src-tauri/res/licenses/piano.sf2.LICENSE.txt`
+- The integrated license file is currently a placeholder because no upstream license text was present in `tmp/`.
 
 ## Status
 
