@@ -343,6 +343,11 @@ input {
   padding: 0.2rem 0.3rem;
 }
 
+.clip-editor__table--tracker input[type="checkbox"] {
+  width: auto;
+  min-width: 0;
+}
+
 .field--checkbox {
   flex-direction: row;
   align-items: center;

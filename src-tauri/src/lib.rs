@@ -11,8 +11,8 @@ use tracing::{error, info, instrument};
 use uuid::Uuid;
 use voltlane_core::{
     AddClipRequest, AddTrackRequest, AudioAnalysis, AudioAssetEntry, AudioClipPatch, ClipPayload,
-    Engine, ExportKind, MidiClip, MidiNote, ParityReport, PatternClip, Project, TrackStatePatch,
-    init_tracing_with_options,
+    DEFAULT_TRACKER_LINES_PER_BEAT, Engine, ExportKind, MidiClip, MidiNote, ParityReport,
+    PatternClip, Project, TrackStatePatch, TrackerRow, init_tracing_with_options,
 };
 
 use crate::config::{AppConfig, AppMode};
@@ -110,6 +110,14 @@ struct UpdateClipNotesInput {
     track_id: String,
     clip_id: String,
     notes: Vec<MidiNote>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdatePatternRowsInput {
+    track_id: String,
+    clip_id: String,
+    rows: Vec<TrackerRow>,
+    lines_per_beat: Option<u16>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -221,6 +229,8 @@ fn add_midi_clip(state: State<'_, AppState>, input: AddMidiClipInput) -> Result<
         ClipPayload::Pattern(PatternClip {
             source_chip,
             notes: input.notes,
+            rows: Vec::new(),
+            lines_per_beat: DEFAULT_TRACKER_LINES_PER_BEAT,
         })
     } else {
         ClipPayload::Midi(MidiClip {
@@ -378,6 +388,22 @@ fn update_clip_notes(
     let mut engine = state.engine.lock();
     engine
         .upsert_clip_notes(track_id, clip_id, input.notes)
+        .map_err(|error| error.to_string())?;
+
+    Ok(engine.project().clone())
+}
+
+#[instrument(skip(state, input))]
+#[tauri::command]
+fn update_pattern_rows(
+    state: State<'_, AppState>,
+    input: UpdatePatternRowsInput,
+) -> Result<Project, String> {
+    let track_id = parse_uuid(&input.track_id)?;
+    let clip_id = parse_uuid(&input.clip_id)?;
+    let mut engine = state.engine.lock();
+    engine
+        .upsert_pattern_rows(track_id, clip_id, input.rows, input.lines_per_beat)
         .map_err(|error| error.to_string())?;
 
     Ok(engine.project().clone())
@@ -679,6 +705,7 @@ pub fn run() {
             update_audio_clip,
             move_clip,
             update_clip_notes,
+            update_pattern_rows,
             add_clip_note,
             remove_clip_note,
             transpose_clip_notes,

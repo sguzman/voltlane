@@ -37,6 +37,7 @@ export default function App() {
     addNoteToClip,
     removeNoteAt,
     replaceClipNotes,
+    replacePatternRows,
     transposeClip,
     quantizeClip,
     scanAudioLibrary,
@@ -215,6 +216,9 @@ export default function App() {
           onAddNote={(trackId, clipId, note) => void addNoteToClip(trackId, clipId, note)}
           onRemoveNote={(trackId, clipId, noteIndex) => void removeNoteAt(trackId, clipId, noteIndex)}
           onReplaceNotes={(trackId, clipId, notes) => void replaceClipNotes(trackId, clipId, notes)}
+          onReplacePatternRows={(trackId, clipId, rows, linesPerBeat) =>
+            void replacePatternRows(trackId, clipId, rows, linesPerBeat)
+          }
           onTranspose={(trackId, clipId, semitones) => void transposeClip(trackId, clipId, semitones)}
           onQuantize={(trackId, clipId, gridTicks) => void quantizeClip(trackId, clipId, gridTicks)}
           onPatchAudioClip={(trackId, clipId, patch) =>

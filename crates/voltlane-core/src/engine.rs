@@ -12,11 +12,11 @@ use crate::{
     },
     export,
     model::{
-        AudioClip, Clip, ClipPayload, DEFAULT_SAMPLE_RATE, EffectSpec, MidiNote, Project, Track,
-        TrackKind,
+        AudioClip, Clip, ClipPayload, DEFAULT_SAMPLE_RATE, EffectSpec, MidiNote, PatternClip,
+        Project, Track, TrackKind, TrackerRow,
     },
     persistence,
-    time::seconds_to_ticks,
+    time::{seconds_to_ticks, tracker_rows_to_ticks},
 };
 
 #[derive(Debug, Error)]
@@ -31,8 +31,12 @@ pub enum EngineError {
     UnsupportedClipPayload(Uuid),
     #[error("clip is not an audio clip: {0}")]
     UnsupportedAudioClip(Uuid),
+    #[error("clip is not a pattern clip: {0}")]
+    UnsupportedPatternClip(Uuid),
     #[error("invalid quantize grid ticks: {0}")]
     InvalidQuantizeGrid(u64),
+    #[error("invalid tracker lines_per_beat: {0}")]
+    InvalidTrackerLinesPerBeat(u16),
     #[error("invalid note index: {0}")]
     InvalidNoteIndex(usize),
     #[error("invalid reorder from {from} to {to}")]
@@ -244,6 +248,11 @@ impl Engine {
 
     #[instrument(skip(self, request), fields(project_id = %self.project.id, track_id = %request.track_id, clip_name = %request.name))]
     pub fn add_clip(&mut self, request: AddClipRequest) -> Result<Clip, EngineError> {
+        let mut payload = request.payload;
+        if let ClipPayload::Pattern(pattern) = &mut payload {
+            normalize_pattern_clip(pattern, self.project.ppq)?;
+        }
+
         let track = self
             .project
             .tracks
@@ -257,7 +266,7 @@ impl Engine {
             start_tick: request.start_tick,
             length_ticks: request.length_ticks.max(1),
             disabled: false,
-            payload: request.payload,
+            payload,
         };
 
         track.clips.push(clip.clone());
@@ -450,6 +459,7 @@ impl Engine {
         clip_id: Uuid,
         mut notes: Vec<MidiNote>,
     ) -> Result<Clip, EngineError> {
+        let ppq = self.project.ppq;
         for note in &mut notes {
             sanitize_note(note);
         }
@@ -459,6 +469,9 @@ impl Engine {
             let target =
                 clip_note_vec_mut(clip).ok_or(EngineError::UnsupportedClipPayload(clip_id))?;
             *target = notes;
+            if let Some(pattern) = clip_pattern_mut(clip) {
+                sync_pattern_rows_from_notes(pattern, ppq)?;
+            }
             clip.clone()
         };
 
@@ -474,6 +487,7 @@ impl Engine {
         clip_id: Uuid,
         mut note: MidiNote,
     ) -> Result<Clip, EngineError> {
+        let ppq = self.project.ppq;
         sanitize_note(&mut note);
 
         let updated_clip = {
@@ -482,6 +496,9 @@ impl Engine {
                 clip_note_vec_mut(clip).ok_or(EngineError::UnsupportedClipPayload(clip_id))?;
             notes.push(note);
             notes.sort_by_key(|candidate| candidate.start_tick);
+            if let Some(pattern) = clip_pattern_mut(clip) {
+                sync_pattern_rows_from_notes(pattern, ppq)?;
+            }
             clip.clone()
         };
 
@@ -497,6 +514,7 @@ impl Engine {
         clip_id: Uuid,
         note_index: usize,
     ) -> Result<Clip, EngineError> {
+        let ppq = self.project.ppq;
         let updated_clip = {
             let clip = self.find_clip_mut(track_id, clip_id)?;
             let notes =
@@ -505,6 +523,9 @@ impl Engine {
                 return Err(EngineError::InvalidNoteIndex(note_index));
             }
             notes.remove(note_index);
+            if let Some(pattern) = clip_pattern_mut(clip) {
+                sync_pattern_rows_from_notes(pattern, ppq)?;
+            }
             clip.clone()
         };
 
@@ -520,6 +541,7 @@ impl Engine {
         clip_id: Uuid,
         semitones: i16,
     ) -> Result<Clip, EngineError> {
+        let ppq = self.project.ppq;
         let updated_clip = {
             let clip = self.find_clip_mut(track_id, clip_id)?;
             let notes =
@@ -529,6 +551,9 @@ impl Engine {
                     .saturating_add(semitones)
                     .clamp(0, 127) as u8;
                 note.pitch = pitch;
+            }
+            if let Some(pattern) = clip_pattern_mut(clip) {
+                sync_pattern_rows_from_notes(pattern, ppq)?;
             }
             clip.clone()
         };
@@ -545,6 +570,7 @@ impl Engine {
         clip_id: Uuid,
         grid_ticks: u64,
     ) -> Result<Clip, EngineError> {
+        let ppq = self.project.ppq;
         if grid_ticks == 0 {
             return Err(EngineError::InvalidQuantizeGrid(grid_ticks));
         }
@@ -561,11 +587,44 @@ impl Engine {
                 sanitize_note(note);
             }
             notes.sort_by_key(|candidate| candidate.start_tick);
+            if let Some(pattern) = clip_pattern_mut(clip) {
+                sync_pattern_rows_from_notes(pattern, ppq)?;
+            }
             clip.clone()
         };
 
         self.project.touch();
         info!("clip notes quantized");
+        Ok(updated_clip)
+    }
+
+    #[instrument(skip(self, rows), fields(project_id = %self.project.id, track_id = %track_id, clip_id = %clip_id, rows = rows.len(), lines_per_beat = ?lines_per_beat))]
+    pub fn upsert_pattern_rows(
+        &mut self,
+        track_id: Uuid,
+        clip_id: Uuid,
+        mut rows: Vec<TrackerRow>,
+        lines_per_beat: Option<u16>,
+    ) -> Result<Clip, EngineError> {
+        let ppq = self.project.ppq;
+        let updated_clip = {
+            let clip = self.find_clip_mut(track_id, clip_id)?;
+            let pattern =
+                clip_pattern_mut(clip).ok_or(EngineError::UnsupportedPatternClip(clip_id))?;
+            if let Some(lines_per_beat) = lines_per_beat {
+                pattern.lines_per_beat = lines_per_beat;
+            }
+
+            for row in &mut rows {
+                sanitize_tracker_row(row);
+            }
+            pattern.rows = rows;
+            normalize_pattern_clip(pattern, ppq)?;
+            clip.clone()
+        };
+
+        self.project.touch();
+        info!("pattern rows replaced");
         Ok(updated_clip)
     }
 
@@ -656,11 +715,113 @@ fn clip_note_vec_mut(clip: &mut Clip) -> Option<&mut Vec<MidiNote>> {
     }
 }
 
+fn clip_pattern_mut(clip: &mut Clip) -> Option<&mut PatternClip> {
+    match &mut clip.payload {
+        ClipPayload::Pattern(pattern) => Some(pattern),
+        ClipPayload::Midi(_) | ClipPayload::Audio(_) | ClipPayload::Automation(_) => None,
+    }
+}
+
 fn sanitize_note(note: &mut MidiNote) {
     note.pitch = note.pitch.min(127);
     note.velocity = note.velocity.min(127);
     note.channel = note.channel.min(15);
     note.length_ticks = note.length_ticks.max(1);
+}
+
+fn sanitize_tracker_row(row: &mut TrackerRow) {
+    row.velocity = row.velocity.min(127);
+    if let Some(note) = row.note {
+        row.note = Some(note.min(127));
+    }
+    if row.effect.as_deref().is_some_and(str::is_empty) {
+        row.effect = None;
+    }
+    if row.effect.is_none() {
+        row.effect_value = None;
+    }
+}
+
+fn normalize_pattern_clip(pattern: &mut PatternClip, ppq: u16) -> Result<(), EngineError> {
+    if pattern.lines_per_beat == 0 {
+        return Err(EngineError::InvalidTrackerLinesPerBeat(
+            pattern.lines_per_beat,
+        ));
+    }
+
+    if pattern.lines_per_beat > 64 {
+        pattern.lines_per_beat = 64;
+    }
+
+    if pattern.rows.is_empty() && !pattern.notes.is_empty() {
+        pattern.rows = tracker_rows_from_notes(&pattern.notes, pattern.lines_per_beat, ppq);
+    } else {
+        for row in &mut pattern.rows {
+            sanitize_tracker_row(row);
+        }
+    }
+
+    pattern.rows.sort_by_key(|row| row.row);
+    pattern.notes = tracker_rows_to_notes(&pattern.rows, pattern.lines_per_beat, ppq)?;
+    Ok(())
+}
+
+fn sync_pattern_rows_from_notes(pattern: &mut PatternClip, ppq: u16) -> Result<(), EngineError> {
+    if pattern.lines_per_beat == 0 {
+        return Err(EngineError::InvalidTrackerLinesPerBeat(
+            pattern.lines_per_beat,
+        ));
+    }
+    pattern.rows = tracker_rows_from_notes(&pattern.notes, pattern.lines_per_beat, ppq);
+    Ok(())
+}
+
+fn tracker_rows_from_notes(notes: &[MidiNote], lines_per_beat: u16, ppq: u16) -> Vec<TrackerRow> {
+    let ticks_per_row = tracker_rows_to_ticks(1, lines_per_beat, ppq).max(1);
+    let mut rows = Vec::with_capacity(notes.len());
+    for note in notes {
+        rows.push(TrackerRow {
+            row: (note.start_tick / ticks_per_row) as u32,
+            note: Some(note.pitch.min(127)),
+            velocity: note.velocity.min(127),
+            gate: true,
+            effect: None,
+            effect_value: None,
+        });
+    }
+    rows.sort_by_key(|row| row.row);
+    rows
+}
+
+fn tracker_rows_to_notes(
+    rows: &[TrackerRow],
+    lines_per_beat: u16,
+    ppq: u16,
+) -> Result<Vec<MidiNote>, EngineError> {
+    if lines_per_beat == 0 {
+        return Err(EngineError::InvalidTrackerLinesPerBeat(lines_per_beat));
+    }
+
+    let row_length_ticks = tracker_rows_to_ticks(1, lines_per_beat, ppq).max(1);
+    let mut notes = Vec::new();
+    for row in rows {
+        if !row.gate {
+            continue;
+        }
+        let Some(note) = row.note else {
+            continue;
+        };
+
+        notes.push(MidiNote {
+            pitch: note.min(127),
+            velocity: row.velocity.min(127),
+            start_tick: tracker_rows_to_ticks(row.row, lines_per_beat, ppq),
+            length_ticks: row_length_ticks,
+            channel: 0,
+        });
+    }
+    notes.sort_by_key(|note| note.start_tick);
+    Ok(notes)
 }
 
 fn sanitize_audio_clip(audio: &mut AudioClip) -> Result<(), EngineError> {

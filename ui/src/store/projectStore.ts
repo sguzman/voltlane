@@ -24,6 +24,7 @@ import {
   setPlayback,
   transposeClipNotes,
   updateAudioClip,
+  updatePatternRows,
   updateClipNotes
 } from "../api/tauri";
 import { logger } from "../lib/logger";
@@ -34,6 +35,7 @@ import type {
   MidiNote,
   ParityReport,
   Project,
+  TrackerRow,
   TrackKind
 } from "../types";
 
@@ -79,6 +81,12 @@ interface ProjectStore {
   addNoteToClip: (trackId: string, clipId: string, note: MidiNote) => Promise<void>;
   removeNoteAt: (trackId: string, clipId: string, noteIndex: number) => Promise<void>;
   replaceClipNotes: (trackId: string, clipId: string, notes: MidiNote[]) => Promise<void>;
+  replacePatternRows: (
+    trackId: string,
+    clipId: string,
+    rows: TrackerRow[],
+    linesPerBeat?: number
+  ) => Promise<void>;
   transposeClip: (trackId: string, clipId: string, semitones: number) => Promise<void>;
   quantizeClip: (trackId: string, clipId: string, gridTicks: number) => Promise<void>;
   scanAudioLibrary: (directory?: string) => Promise<void>;
@@ -318,6 +326,19 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         track_id: trackId,
         clip_id: clipId,
         notes
+      });
+      set({ project: updated, selectedTrackId: trackId, selectedClipId: clipId });
+      await get().refreshParity();
+    });
+  },
+
+  replacePatternRows: async (trackId, clipId, rows, linesPerBeat) => {
+    await withErrorHandling(set, async () => {
+      const updated = await updatePatternRows({
+        track_id: trackId,
+        clip_id: clipId,
+        rows,
+        lines_per_beat: linesPerBeat
       });
       set({ project: updated, selectedTrackId: trackId, selectedClipId: clipId });
       await get().refreshParity();

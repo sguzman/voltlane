@@ -22,9 +22,20 @@ export interface MidiClip {
   notes: MidiNote[];
 }
 
+export interface TrackerRow {
+  row: number;
+  note: number | null;
+  velocity: number;
+  gate: boolean;
+  effect: string | null;
+  effect_value: number | null;
+}
+
 export interface PatternClip {
   source_chip: string;
   notes: MidiNote[];
+  rows: TrackerRow[];
+  lines_per_beat: number;
 }
 
 export interface AudioClip {
@@ -189,6 +200,13 @@ export interface UpdateClipNotesInput {
   track_id: string;
   clip_id: string;
   notes: MidiNote[];
+}
+
+export interface UpdatePatternRowsInput {
+  track_id: string;
+  clip_id: string;
+  rows: TrackerRow[];
+  lines_per_beat?: number;
 }
 
 export interface AddClipNoteInput {

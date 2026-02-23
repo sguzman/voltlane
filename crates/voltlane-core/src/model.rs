@@ -6,6 +6,7 @@ use uuid::Uuid;
 
 pub const DEFAULT_PPQ: u16 = 480;
 pub const DEFAULT_SAMPLE_RATE: u32 = 48_000;
+pub const DEFAULT_TRACKER_LINES_PER_BEAT: u16 = 4;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Project {
@@ -197,7 +198,50 @@ pub struct MidiClip {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PatternClip {
     pub source_chip: String,
+    #[serde(default)]
     pub notes: Vec<MidiNote>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rows: Vec<TrackerRow>,
+    #[serde(
+        default = "default_tracker_lines_per_beat",
+        skip_serializing_if = "is_default_tracker_lines_per_beat"
+    )]
+    pub lines_per_beat: u16,
+}
+
+impl Default for PatternClip {
+    fn default() -> Self {
+        Self {
+            source_chip: String::new(),
+            notes: Vec::new(),
+            rows: Vec::new(),
+            lines_per_beat: default_tracker_lines_per_beat(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct TrackerRow {
+    pub row: u32,
+    pub note: Option<u8>,
+    pub velocity: u8,
+    pub gate: bool,
+    pub effect: Option<String>,
+    pub effect_value: Option<u16>,
+}
+
+impl Default for TrackerRow {
+    fn default() -> Self {
+        Self {
+            row: 0,
+            note: None,
+            velocity: 100,
+            gate: false,
+            effect: None,
+            effect_value: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -285,4 +329,12 @@ impl MidiNote {
     pub fn end_tick(&self) -> u64 {
         self.start_tick.saturating_add(self.length_ticks)
     }
+}
+
+const fn default_tracker_lines_per_beat() -> u16 {
+    DEFAULT_TRACKER_LINES_PER_BEAT
+}
+
+const fn is_default_tracker_lines_per_beat(value: &u16) -> bool {
+    *value == DEFAULT_TRACKER_LINES_PER_BEAT
 }

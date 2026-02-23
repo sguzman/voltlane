@@ -20,7 +20,7 @@ pub use engine::{
     TrackStatePatch,
 };
 pub use model::{
-    AudioClip, AutomationClip, AutomationPoint, Clip, ClipPayload, EffectSpec, MidiClip, MidiNote,
-    PatternClip, Project, Track, TrackKind, Transport,
+    AudioClip, AutomationClip, AutomationPoint, Clip, ClipPayload, DEFAULT_TRACKER_LINES_PER_BEAT,
+    EffectSpec, MidiClip, MidiNote, PatternClip, Project, Track, TrackKind, TrackerRow, Transport,
 };
 pub use parity::{ParityReport, generate_parity_report};

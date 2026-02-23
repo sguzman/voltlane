@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 
-import type { Clip, MidiNote } from "../types";
+import type { Clip, MidiNote, TrackerRow } from "../types";
 
 interface ClipEditorProps {
   clip: Clip | null;
@@ -11,6 +11,12 @@ interface ClipEditorProps {
   onAddNote: (trackId: string, clipId: string, note: MidiNote) => void;
   onRemoveNote: (trackId: string, clipId: string, noteIndex: number) => void;
   onReplaceNotes: (trackId: string, clipId: string, notes: MidiNote[]) => void;
+  onReplacePatternRows: (
+    trackId: string,
+    clipId: string,
+    rows: TrackerRow[],
+    linesPerBeat?: number
+  ) => void;
   onTranspose: (trackId: string, clipId: string, semitones: number) => void;
   onQuantize: (trackId: string, clipId: string, gridTicks: number) => void;
   onPatchAudioClip: (
@@ -42,6 +48,13 @@ function clipNotes(clip: Clip | null): MidiNote[] {
   return [];
 }
 
+function clipTrackerRows(clip: Clip | null): TrackerRow[] {
+  if (!clip || !("pattern" in clip.payload)) {
+    return [];
+  }
+  return clip.payload.pattern.rows;
+}
+
 export function ClipEditor({
   clip,
   trackId,
@@ -51,6 +64,7 @@ export function ClipEditor({
   onAddNote,
   onRemoveNote,
   onReplaceNotes,
+  onReplacePatternRows,
   onTranspose,
   onQuantize,
   onPatchAudioClip
@@ -58,6 +72,8 @@ export function ClipEditor({
   const [clipStart, setClipStart] = useState(0);
   const [clipLength, setClipLength] = useState(1_920);
   const [draftNotes, setDraftNotes] = useState<MidiNote[]>([]);
+  const [draftRows, setDraftRows] = useState<TrackerRow[]>([]);
+  const [linesPerBeat, setLinesPerBeat] = useState(4);
   const [audioGainDb, setAudioGainDb] = useState(0);
   const [audioPan, setAudioPan] = useState(0);
   const [trimStartSeconds, setTrimStartSeconds] = useState(0);
@@ -71,6 +87,12 @@ export function ClipEditor({
     setClipStart(clip?.start_tick ?? 0);
     setClipLength(clip?.length_ticks ?? 1_920);
     setDraftNotes(clipNotes(clip));
+    setDraftRows(clipTrackerRows(clip));
+    if (clip && "pattern" in clip.payload) {
+      setLinesPerBeat(clip.payload.pattern.lines_per_beat);
+    } else {
+      setLinesPerBeat(4);
+    }
 
     if (clip && "audio" in clip.payload) {
       const audio = clip.payload.audio;
@@ -89,7 +111,14 @@ export function ClipEditor({
     if (!clip) {
       return false;
     }
-    return "midi" in clip.payload || "pattern" in clip.payload;
+    return "midi" in clip.payload;
+  }, [clip]);
+
+  const isPatternEditable = useMemo(() => {
+    if (!clip) {
+      return false;
+    }
+    return "pattern" in clip.payload;
   }, [clip]);
 
   const isAudioEditable = useMemo(() => {
@@ -332,6 +361,167 @@ export function ClipEditor({
         </>
       ) : null}
 
+      {isPatternEditable ? (
+        <>
+          <div className="clip-editor__actions">
+            <label className="field">
+              <span>Lines / Beat</span>
+              <input
+                type="number"
+                min={1}
+                max={64}
+                value={linesPerBeat}
+                onChange={(event) => setLinesPerBeat(Number(event.target.value))}
+              />
+            </label>
+            <button
+              type="button"
+              className="pill"
+              disabled={loading}
+              onClick={() => {
+                const nextRow = (draftRows[draftRows.length - 1]?.row ?? -1) + 1;
+                setDraftRows([
+                  ...draftRows,
+                  {
+                    row: Math.max(0, nextRow),
+                    note: 60,
+                    velocity: 100,
+                    gate: true,
+                    effect: null,
+                    effect_value: null
+                  }
+                ]);
+              }}
+            >
+              Add Tracker Row
+            </button>
+            <button
+              type="button"
+              className="pill"
+              disabled={loading}
+              onClick={() => onReplacePatternRows(trackId, clip.id, draftRows, linesPerBeat)}
+            >
+              Save Tracker Grid
+            </button>
+          </div>
+
+          <div className="clip-editor__table-wrap">
+            <table className="clip-editor__table clip-editor__table--tracker">
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>Row</th>
+                  <th>Note</th>
+                  <th>Vel</th>
+                  <th>Gate</th>
+                  <th>FX</th>
+                  <th>Val</th>
+                  <th />
+                </tr>
+              </thead>
+              <tbody>
+                {draftRows.map((row, index) => (
+                  <tr key={`${row.row}-${index}`}>
+                    <td>{index + 1}</td>
+                    <td>
+                      <input
+                        type="number"
+                        min={0}
+                        value={row.row}
+                        onChange={(event) => {
+                          const next = [...draftRows];
+                          next[index] = { ...row, row: Number(event.target.value) };
+                          setDraftRows(next);
+                        }}
+                      />
+                    </td>
+                    <td>
+                      <input
+                        type="number"
+                        min={0}
+                        max={127}
+                        value={row.note ?? 60}
+                        onChange={(event) => {
+                          const next = [...draftRows];
+                          next[index] = { ...row, note: Number(event.target.value) };
+                          setDraftRows(next);
+                        }}
+                      />
+                    </td>
+                    <td>
+                      <input
+                        type="number"
+                        min={0}
+                        max={127}
+                        value={row.velocity}
+                        onChange={(event) => {
+                          const next = [...draftRows];
+                          next[index] = { ...row, velocity: Number(event.target.value) };
+                          setDraftRows(next);
+                        }}
+                      />
+                    </td>
+                    <td>
+                      <input
+                        type="checkbox"
+                        checked={row.gate}
+                        onChange={(event) => {
+                          const next = [...draftRows];
+                          next[index] = { ...row, gate: event.target.checked };
+                          setDraftRows(next);
+                        }}
+                      />
+                    </td>
+                    <td>
+                      <input
+                        value={row.effect ?? ""}
+                        onChange={(event) => {
+                          const value = event.target.value.trim();
+                          const next = [...draftRows];
+                          next[index] = { ...row, effect: value.length > 0 ? value : null };
+                          setDraftRows(next);
+                        }}
+                      />
+                    </td>
+                    <td>
+                      <input
+                        type="number"
+                        min={0}
+                        max={65535}
+                        value={row.effect_value ?? 0}
+                        onChange={(event) => {
+                          const next = [...draftRows];
+                          next[index] = { ...row, effect_value: Number(event.target.value) };
+                          setDraftRows(next);
+                        }}
+                      />
+                    </td>
+                    <td>
+                      <button
+                        type="button"
+                        className="mini"
+                        disabled={loading}
+                        onClick={() => {
+                          const next = draftRows.filter((_, candidateIndex) => candidateIndex !== index);
+                          setDraftRows(next);
+                        }}
+                      >
+                        Delete
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+                {draftRows.length === 0 ? (
+                  <tr>
+                    <td colSpan={8}>No tracker rows yet.</td>
+                  </tr>
+                ) : null}
+              </tbody>
+            </table>
+          </div>
+        </>
+      ) : null}
+
       {isAudioEditable ? (
         <>
           <div className="panel__grid">
@@ -438,7 +628,9 @@ export function ClipEditor({
         </>
       ) : null}
 
-      {!isMidiEditable && !isAudioEditable ? <p>This clip type is not editable yet.</p> : null}
+      {!isMidiEditable && !isPatternEditable && !isAudioEditable ? (
+        <p>This clip type is not editable yet.</p>
+      ) : null}
     </aside>
   );
 }

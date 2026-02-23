@@ -18,10 +18,12 @@ import type {
   Project,
   RemoveClipNoteInput,
   ScanAudioAssetsInput,
+  TrackerRow,
   Track,
   TrackKind,
   TransposeClipNotesInput,
   UpdateAudioClipInput,
+  UpdatePatternRowsInput,
   UpdateClipNotesInput
 } from "../types";
 
@@ -183,6 +185,44 @@ function clampNote(value: UpdateClipNotesInput["notes"][number]): UpdateClipNote
   };
 }
 
+function notesToTrackerRows(notes: UpdateClipNotesInput["notes"], linesPerBeat = 4, ppq = 480): TrackerRow[] {
+  const ticksPerRow = Math.max(1, Math.round(ppq / linesPerBeat));
+  return notes
+    .map((note) => ({
+      row: Math.max(0, Math.round(note.start_tick / ticksPerRow)),
+      note: Math.max(0, Math.min(127, Math.round(note.pitch))),
+      velocity: Math.max(0, Math.min(127, Math.round(note.velocity))),
+      gate: true,
+      effect: null,
+      effect_value: null
+    }))
+    .sort((left, right) => left.row - right.row);
+}
+
+function trackerRowsToNotes(rows: TrackerRow[], linesPerBeat = 4, ppq = 480): UpdateClipNotesInput["notes"] {
+  const ticksPerRow = Math.max(1, Math.round(ppq / linesPerBeat));
+  return rows
+    .filter((row) => row.gate && typeof row.note === "number")
+    .map((row) => ({
+      pitch: Math.max(0, Math.min(127, Math.round(row.note ?? 60))),
+      velocity: Math.max(0, Math.min(127, Math.round(row.velocity))),
+      start_tick: Math.max(0, Math.round(row.row)) * ticksPerRow,
+      length_ticks: ticksPerRow,
+      channel: 0
+    }))
+    .sort((left, right) => left.start_tick - right.start_tick);
+}
+
+function syncPatternRowsFromNotes(clip: Clip): void {
+  if (!("pattern" in clip.payload)) {
+    return;
+  }
+  clip.payload.pattern.rows = notesToTrackerRows(
+    clip.payload.pattern.notes,
+    clip.payload.pattern.lines_per_beat
+  );
+}
+
 function mockWaveformPeaks(bucketSize: number, count = 128): number[] {
   const density = Math.max(1, bucketSize);
   return Array.from({ length: count }, (_, index) => {
@@ -271,7 +311,14 @@ async function invokeMock<T>(command: string, args?: Record<string, unknown>): P
         length_ticks: input.length_ticks,
         disabled: false,
         payload: input.source_chip
-          ? { pattern: { source_chip: input.source_chip, notes: input.notes } }
+          ? {
+              pattern: {
+                source_chip: input.source_chip,
+                notes: input.notes,
+                rows: notesToTrackerRows(input.notes),
+                lines_per_beat: 4
+              }
+            }
           : { midi: { instrument: input.instrument ?? null, notes: input.notes } }
       };
 
@@ -410,8 +457,35 @@ async function invokeMock<T>(command: string, args?: Record<string, unknown>): P
         clip.payload.midi.notes = notes;
       } else {
         clip.payload.pattern.notes = notes;
+        syncPatternRowsFromNotes(clip);
       }
 
+      touchProject();
+      return mockProject as T;
+    }
+
+    case "update_pattern_rows": {
+      const input = args?.input as UpdatePatternRowsInput;
+      const { clip } = getClipRefs(mockProject, input.track_id, input.clip_id);
+      if (!("pattern" in clip.payload)) {
+        throw new Error(`clip payload is not pattern: ${input.clip_id}`);
+      }
+      const linesPerBeat = Math.max(1, Math.round(input.lines_per_beat ?? clip.payload.pattern.lines_per_beat));
+      clip.payload.pattern.lines_per_beat = linesPerBeat;
+      clip.payload.pattern.rows = input.rows
+        .map((row) => ({
+          row: Math.max(0, Math.round(row.row)),
+          note: typeof row.note === "number" ? Math.max(0, Math.min(127, Math.round(row.note))) : null,
+          velocity: Math.max(0, Math.min(127, Math.round(row.velocity))),
+          gate: Boolean(row.gate),
+          effect: row.effect?.trim() ? row.effect : null,
+          effect_value:
+            typeof row.effect_value === "number"
+              ? Math.max(0, Math.min(65535, Math.round(row.effect_value)))
+              : null
+        }))
+        .sort((left, right) => left.row - right.row);
+      clip.payload.pattern.notes = trackerRowsToNotes(clip.payload.pattern.rows, linesPerBeat, mockProject.ppq);
       touchProject();
       return mockProject as T;
     }
@@ -425,6 +499,7 @@ async function invokeMock<T>(command: string, args?: Record<string, unknown>): P
       const note = clampNote(input.note);
       noteListFromClip(clip).push(note);
       noteListFromClip(clip).sort((left, right) => left.start_tick - right.start_tick);
+      syncPatternRowsFromNotes(clip);
       touchProject();
       return mockProject as T;
     }
@@ -440,6 +515,7 @@ async function invokeMock<T>(command: string, args?: Record<string, unknown>): P
         throw new Error(`invalid note index: ${input.note_index}`);
       }
       notes.splice(input.note_index, 1);
+      syncPatternRowsFromNotes(clip);
       touchProject();
       return mockProject as T;
     }
@@ -454,6 +530,7 @@ async function invokeMock<T>(command: string, args?: Record<string, unknown>): P
       for (const note of notes) {
         note.pitch = Math.max(0, Math.min(127, Math.round(note.pitch + input.semitones)));
       }
+      syncPatternRowsFromNotes(clip);
       touchProject();
       return mockProject as T;
     }
@@ -474,6 +551,7 @@ async function invokeMock<T>(command: string, args?: Record<string, unknown>): P
         note.length_ticks = Math.max(grid, Math.round(note.length_ticks / grid) * grid);
       }
       notes.sort((left, right) => left.start_tick - right.start_tick);
+      syncPatternRowsFromNotes(clip);
       touchProject();
       return mockProject as T;
     }
@@ -599,6 +677,10 @@ export async function moveClip(input: MoveClipInput): Promise<Project> {
 
 export async function updateClipNotes(input: UpdateClipNotesInput): Promise<Project> {
   return invokeCommand<Project>("update_clip_notes", { input });
+}
+
+export async function updatePatternRows(input: UpdatePatternRowsInput): Promise<Project> {
+  return invokeCommand<Project>("update_pattern_rows", { input });
 }
 
 export async function addClipNote(input: AddClipNoteInput): Promise<Project> {

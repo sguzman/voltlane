@@ -106,6 +106,8 @@ pub fn demo_project() -> Project {
                     channel: 1,
                 },
             ],
+            rows: Vec::new(),
+            lines_per_beat: crate::model::DEFAULT_TRACKER_LINES_PER_BEAT,
         }),
     });
 

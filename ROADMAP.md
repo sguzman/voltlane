@@ -37,7 +37,7 @@
 ## Phase 4: Chiptune/Tracker Differentiator
 
 - [x] Pattern clip payload shape and chip-source metadata
-- [ ] Tracker grid editor (rows/effects)
+- [x] Tracker grid editor (rows/effects)
 - [ ] Chip macro editor (duty/env/arpeggio)
 - [ ] Real chip backend emulation pipeline
 

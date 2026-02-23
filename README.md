@@ -27,6 +27,7 @@ The current implementation now spans Milestone A/B plus core audio-clip workflow
 - Tauri commands for all major operations (`project/track/clip/export/parity`).
 - React UI for playlist lanes, track controls, transport, and parity panel.
 - Clip editor panel for MIDI/pattern note editing (add/remove/update notes, quantize, transpose).
+- Tracker grid editor for chip pattern clips (row/effect editing with pattern-note regeneration).
 - Audio browser panel for asset indexing, waveform preview metadata, and direct import into audio tracks.
 - Deterministic parity harness:
   - golden baseline test
