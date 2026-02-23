@@ -29,10 +29,10 @@
 
 ## Phase 3: Audio Clip Workflow
 
-- [ ] Audio file import/decode path in core
-- [ ] Waveform peak cache generation
-- [ ] Clip trim/fade/reverse/stretch
-- [ ] Browser preview and asset indexing
+- [x] Audio file import/decode path in core
+- [x] Waveform peak cache generation
+- [x] Clip trim/fade/reverse/stretch
+- [x] Browser preview and asset indexing
 
 ## Phase 4: Chiptune/Tracker Differentiator
 

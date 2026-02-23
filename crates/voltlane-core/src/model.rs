@@ -201,10 +201,62 @@ pub struct PatternClip {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
 pub struct AudioClip {
     pub source_path: String,
     pub gain_db: f32,
     pub pan: f32,
+    pub source_sample_rate: u32,
+    pub source_channels: u16,
+    pub source_duration_seconds: f64,
+    pub trim_start_seconds: f64,
+    pub trim_end_seconds: f64,
+    pub fade_in_seconds: f64,
+    pub fade_out_seconds: f64,
+    pub reverse: bool,
+    pub stretch_ratio: f32,
+    pub waveform_bucket_size: usize,
+    pub waveform_peaks: Vec<f32>,
+    pub waveform_cache_path: Option<String>,
+}
+
+impl Default for AudioClip {
+    fn default() -> Self {
+        Self {
+            source_path: String::new(),
+            gain_db: 0.0,
+            pan: 0.0,
+            source_sample_rate: DEFAULT_SAMPLE_RATE,
+            source_channels: 2,
+            source_duration_seconds: 0.0,
+            trim_start_seconds: 0.0,
+            trim_end_seconds: 0.0,
+            fade_in_seconds: 0.0,
+            fade_out_seconds: 0.0,
+            reverse: false,
+            stretch_ratio: 1.0,
+            waveform_bucket_size: 1024,
+            waveform_peaks: Vec::new(),
+            waveform_cache_path: None,
+        }
+    }
+}
+
+impl AudioClip {
+    #[must_use]
+    pub fn normalized_trim_range(&self) -> (f64, f64) {
+        let source_duration = self.source_duration_seconds.max(0.0);
+        let trim_start = self.trim_start_seconds.clamp(0.0, source_duration);
+        let trim_end = self.trim_end_seconds.clamp(trim_start, source_duration);
+        (trim_start, trim_end)
+    }
+
+    #[must_use]
+    pub fn effective_duration_seconds(&self) -> f64 {
+        let (trim_start, trim_end) = self.normalized_trim_range();
+        let trimmed_duration = (trim_end - trim_start).max(0.0);
+        trimmed_duration * f64::from(self.stretch_ratio.max(0.01))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

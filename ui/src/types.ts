@@ -31,6 +31,18 @@ export interface AudioClip {
   source_path: string;
   gain_db: number;
   pan: number;
+  source_sample_rate: number;
+  source_channels: number;
+  source_duration_seconds: number;
+  trim_start_seconds: number;
+  trim_end_seconds: number;
+  fade_in_seconds: number;
+  fade_out_seconds: number;
+  reverse: boolean;
+  stretch_ratio: number;
+  waveform_bucket_size: number;
+  waveform_peaks: number[];
+  waveform_cache_path: string | null;
 }
 
 export interface AutomationPoint {
@@ -111,6 +123,59 @@ export interface AddMidiClipInput {
   instrument?: string;
   source_chip?: string;
   notes: MidiNote[];
+}
+
+export interface ScanAudioAssetsInput {
+  directory?: string;
+}
+
+export interface AudioAssetEntry {
+  path: string;
+  extension: string;
+  size_bytes: number;
+}
+
+export interface AudioWaveformPeaks {
+  bucket_size: number;
+  peaks: number[];
+}
+
+export interface AudioAnalysis {
+  source_path: string;
+  sample_rate: number;
+  channels: number;
+  total_frames: number;
+  duration_seconds: number;
+  peaks: AudioWaveformPeaks;
+  cache_path: string | null;
+}
+
+export interface AnalyzeAudioAssetInput {
+  path: string;
+  cache_dir?: string;
+  bucket_size?: number;
+}
+
+export interface ImportAudioClipInput {
+  track_id: string;
+  name?: string;
+  source_path: string;
+  start_tick: number;
+  cache_dir?: string;
+  bucket_size?: number;
+}
+
+export interface UpdateAudioClipInput {
+  track_id: string;
+  clip_id: string;
+  gain_db?: number;
+  pan?: number;
+  trim_start_seconds?: number;
+  trim_end_seconds?: number;
+  fade_in_seconds?: number;
+  fade_out_seconds?: number;
+  reverse?: boolean;
+  stretch_ratio?: number;
 }
 
 export interface MoveClipInput {

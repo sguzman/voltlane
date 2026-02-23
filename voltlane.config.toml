@@ -9,6 +9,14 @@ default_sample_rate = 48000
 default_soundfont_path = "src-tauri/res/soundfonts/piano.sf2"
 default_soundfont_license_path = "src-tauri/res/soundfonts/piano.sf2.LICENSE"
 
+[audio]
+asset_directories = ["tmp/audio", "tmp"]
+waveform_cache_dir = "tmp/waveform-cache"
+analysis_bucket_size = 1024
+default_import_clip_name = "Audio Clip"
+default_gain_db = 0.0
+default_pan = 0.0
+
 [transport]
 default_loop_start_tick = 0
 default_loop_end_tick = 1920

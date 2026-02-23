@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 
+import { AudioBrowserPanel } from "./components/AudioBrowserPanel";
 import { ClipEditor } from "./components/ClipEditor";
 import { ParityPanel } from "./components/ParityPanel";
 import { TrackLane } from "./components/TrackLane";
@@ -19,6 +20,10 @@ export default function App() {
     error,
     selectedTrackId,
     selectedClipId,
+    audioAssets,
+    audioScanDirectory,
+    selectedAudioAssetPath,
+    audioPreview,
     bootstrap,
     createNewProject,
     addTrackByKind,
@@ -34,6 +39,10 @@ export default function App() {
     replaceClipNotes,
     transposeClip,
     quantizeClip,
+    scanAudioLibrary,
+    previewAudioAsset,
+    importAudioAsset,
+    patchAudioClipSettings,
     runExport,
     saveCurrentProject,
     loadCurrentProject,
@@ -208,9 +217,23 @@ export default function App() {
           onReplaceNotes={(trackId, clipId, notes) => void replaceClipNotes(trackId, clipId, notes)}
           onTranspose={(trackId, clipId, semitones) => void transposeClip(trackId, clipId, semitones)}
           onQuantize={(trackId, clipId, gridTicks) => void quantizeClip(trackId, clipId, gridTicks)}
+          onPatchAudioClip={(trackId, clipId, patch) =>
+            void patchAudioClipSettings(trackId, clipId, patch)
+          }
         />
-
-        <ParityPanel project={project} parity={parity} onRefreshParity={() => void refreshParity()} />
+        <div className="sidebar-stack">
+          <AudioBrowserPanel
+            directory={audioScanDirectory}
+            assets={audioAssets}
+            selectedAssetPath={selectedAudioAssetPath}
+            preview={audioPreview}
+            loading={loading}
+            onScan={(directory) => void scanAudioLibrary(directory)}
+            onSelectAsset={(assetPath) => void previewAudioAsset(assetPath)}
+            onImportAsset={(assetPath) => void importAudioAsset(assetPath)}
+          />
+          <ParityPanel project={project} parity={parity} onRefreshParity={() => void refreshParity()} />
+        </div>
       </section>
 
       {error ? (

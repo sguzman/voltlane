@@ -19,6 +19,7 @@ pub struct AppConfig {
     pub mode: AppMode,
     pub project: ProjectConfig,
     pub midi: MidiConfig,
+    pub audio: AudioConfig,
     pub transport: TransportConfig,
     pub diagnostics: DiagnosticsConfig,
     pub paths: PathsConfig,
@@ -47,6 +48,17 @@ pub struct TransportConfig {
     pub default_loop_start_tick: u64,
     pub default_loop_end_tick: u64,
     pub metronome_enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AudioConfig {
+    pub asset_directories: Vec<PathBuf>,
+    pub waveform_cache_dir: PathBuf,
+    pub analysis_bucket_size: usize,
+    pub default_import_clip_name: String,
+    pub default_gain_db: f32,
+    pub default_pan: f32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -87,6 +99,7 @@ impl Default for AppConfig {
             mode: AppMode::Dev,
             project: ProjectConfig::default(),
             midi: MidiConfig::default(),
+            audio: AudioConfig::default(),
             transport: TransportConfig::default(),
             diagnostics: DiagnosticsConfig::default(),
             paths: PathsConfig::default(),
@@ -123,6 +136,19 @@ impl Default for TransportConfig {
             default_loop_start_tick: 0,
             default_loop_end_tick: 1_920,
             metronome_enabled: true,
+        }
+    }
+}
+
+impl Default for AudioConfig {
+    fn default() -> Self {
+        Self {
+            asset_directories: vec![PathBuf::from("tmp/audio"), PathBuf::from("tmp")],
+            waveform_cache_dir: PathBuf::from("tmp/waveform-cache"),
+            analysis_bucket_size: 1024,
+            default_import_clip_name: "Audio Clip".to_string(),
+            default_gain_db: 0.0,
+            default_pan: 0.0,
         }
     }
 }

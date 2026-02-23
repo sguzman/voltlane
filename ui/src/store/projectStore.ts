@@ -5,10 +5,12 @@ import {
   addEffect,
   addMidiClip,
   addTrack,
+  analyzeAudioAsset,
   autosaveProject,
   createProject,
   exportProject,
   getProject,
+  importAudioClip,
   loadProject,
   measureParity,
   moveClip,
@@ -16,14 +18,24 @@ import {
   quantizeClipNotes,
   reorderTrack,
   removeClipNote,
+  scanAudioAssets,
   saveProject,
   setLoopRegion,
   setPlayback,
   transposeClipNotes,
+  updateAudioClip,
   updateClipNotes
 } from "../api/tauri";
 import { logger } from "../lib/logger";
-import type { ExportKind, MidiNote, ParityReport, Project, TrackKind } from "../types";
+import type {
+  AudioAnalysis,
+  AudioAssetEntry,
+  ExportKind,
+  MidiNote,
+  ParityReport,
+  Project,
+  TrackKind
+} from "../types";
 
 const TRACK_COLORS = [
   "#20d0ba",
@@ -42,6 +54,10 @@ interface ProjectStore {
   outputRoot: string;
   selectedTrackId: string | null;
   selectedClipId: string | null;
+  audioAssets: AudioAssetEntry[];
+  audioScanDirectory: string;
+  selectedAudioAssetPath: string | null;
+  audioPreview: AudioAnalysis | null;
   bootstrap: () => Promise<void>;
   createNewProject: (title: string) => Promise<void>;
   addTrackByKind: (kind: TrackKind) => Promise<void>;
@@ -65,6 +81,23 @@ interface ProjectStore {
   replaceClipNotes: (trackId: string, clipId: string, notes: MidiNote[]) => Promise<void>;
   transposeClip: (trackId: string, clipId: string, semitones: number) => Promise<void>;
   quantizeClip: (trackId: string, clipId: string, gridTicks: number) => Promise<void>;
+  scanAudioLibrary: (directory?: string) => Promise<void>;
+  previewAudioAsset: (assetPath: string) => Promise<void>;
+  importAudioAsset: (assetPath: string, startTick?: number) => Promise<void>;
+  patchAudioClipSettings: (
+    trackId: string,
+    clipId: string,
+    patch: {
+      gain_db?: number;
+      pan?: number;
+      trim_start_seconds?: number;
+      trim_end_seconds?: number;
+      fade_in_seconds?: number;
+      fade_out_seconds?: number;
+      reverse?: boolean;
+      stretch_ratio?: number;
+    }
+  ) => Promise<void>;
   runExport: (kind: ExportKind) => Promise<void>;
   saveCurrentProject: () => Promise<void>;
   loadCurrentProject: () => Promise<void>;
@@ -121,6 +154,10 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   outputRoot: "tmp/out",
   selectedTrackId: null,
   selectedClipId: null,
+  audioAssets: [],
+  audioScanDirectory: "tmp/audio",
+  selectedAudioAssetPath: null,
+  audioPreview: null,
 
   bootstrap: async () => {
     await withErrorHandling(set, async () => {
@@ -132,6 +169,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         selectedClipId: project.tracks[0]?.clips[0]?.id ?? null
       });
       await get().refreshParity();
+      await get().scanAudioLibrary();
     });
   },
 
@@ -169,6 +207,9 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
 
   addQuickClip: async (trackId, kind) => {
     await withErrorHandling(set, async () => {
+      if (kind === "audio") {
+        throw new Error("Use Audio Browser to import audio clips into audio tracks.");
+      }
       const isChip = kind === "chip";
       const updated = await addMidiClip({
         track_id: trackId,
@@ -301,6 +342,98 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         track_id: trackId,
         clip_id: clipId,
         grid_ticks: gridTicks
+      });
+      set({ project: updated, selectedTrackId: trackId, selectedClipId: clipId });
+      await get().refreshParity();
+    });
+  },
+
+  scanAudioLibrary: async (directory) => {
+    await withErrorHandling(set, async () => {
+      const nextDirectory = directory?.trim() || get().audioScanDirectory;
+      const assets = await scanAudioAssets({ directory: nextDirectory });
+      const previousSelection = get().selectedAudioAssetPath;
+      const selectedAudioAssetPath =
+        (previousSelection && assets.some((asset) => asset.path === previousSelection)
+          ? previousSelection
+          : assets[0]?.path) ?? null;
+
+      const audioPreview = selectedAudioAssetPath
+        ? await analyzeAudioAsset({ path: selectedAudioAssetPath })
+        : null;
+      set({
+        audioScanDirectory: nextDirectory,
+        audioAssets: assets,
+        selectedAudioAssetPath,
+        audioPreview
+      });
+    });
+  },
+
+  previewAudioAsset: async (assetPath) => {
+    await withErrorHandling(set, async () => {
+      const analysis = await analyzeAudioAsset({ path: assetPath });
+      set({
+        selectedAudioAssetPath: assetPath,
+        audioPreview: analysis
+      });
+    });
+  },
+
+  importAudioAsset: async (assetPath, startTick) => {
+    await withErrorHandling(set, async () => {
+      const project = get().project;
+      if (!project) {
+        return;
+      }
+
+      let workingProject = project;
+      let targetTrack =
+        workingProject.tracks.find(
+          (track) => track.id === get().selectedTrackId && track.kind === "audio"
+        ) ?? workingProject.tracks.find((track) => track.kind === "audio");
+
+      if (!targetTrack) {
+        workingProject = await addTrack({
+          name: nextTrackName(workingProject, "audio"),
+          color: nextTrackColor(workingProject),
+          kind: "audio"
+        });
+        targetTrack = workingProject.tracks.find((track) => track.kind === "audio");
+      }
+      if (!targetTrack) {
+        throw new Error("failed to resolve audio track for import");
+      }
+
+      const inferredName =
+        assetPath.split(/[\\/]/).pop()?.replace(/\.[^.]+$/, "") ?? "Audio Clip";
+      const updated = await importAudioClip({
+        track_id: targetTrack.id,
+        name: inferredName,
+        source_path: assetPath,
+        start_tick: startTick ?? workingProject.transport.playhead_tick
+      });
+      const updatedTrack = updated.tracks.find((track) => track.id === targetTrack.id);
+      const selectedClipId = updatedTrack?.clips[updatedTrack.clips.length - 1]?.id ?? null;
+      const audioPreview = await analyzeAudioAsset({ path: assetPath });
+
+      set({
+        project: updated,
+        selectedTrackId: targetTrack.id,
+        selectedClipId,
+        selectedAudioAssetPath: assetPath,
+        audioPreview
+      });
+      await get().refreshParity();
+    });
+  },
+
+  patchAudioClipSettings: async (trackId, clipId, patch) => {
+    await withErrorHandling(set, async () => {
+      const updated = await updateAudioClip({
+        track_id: trackId,
+        clip_id: clipId,
+        ...patch
       });
       set({ project: updated, selectedTrackId: trackId, selectedClipId: clipId });
       await get().refreshParity();

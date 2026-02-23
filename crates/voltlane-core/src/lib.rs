@@ -1,3 +1,4 @@
+pub mod assets;
 pub mod diagnostics;
 pub mod engine;
 pub mod export;
@@ -7,11 +8,16 @@ pub mod parity;
 pub mod persistence;
 pub mod time;
 
+pub use assets::{
+    AudioAnalysis, AudioAssetEntry, AudioWaveformPeaks, DecodedAudio, analyze_audio_file,
+    analyze_audio_file_with_cache, decode_audio_file_mono, scan_audio_assets,
+};
 pub use diagnostics::{
     TelemetryGuard, init_tracing, init_tracing_with_file_prefix, init_tracing_with_options,
 };
 pub use engine::{
-    AddClipRequest, AddTrackRequest, Engine, EngineError, ExportKind, TrackStatePatch,
+    AddClipRequest, AddTrackRequest, AudioClipPatch, Engine, EngineError, ExportKind,
+    TrackStatePatch,
 };
 pub use model::{
     AudioClip, AutomationClip, AutomationPoint, Clip, ClipPayload, EffectSpec, MidiClip, MidiNote,

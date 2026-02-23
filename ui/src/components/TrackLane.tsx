@@ -21,6 +21,9 @@ function clipTypeLabel(track: Track): string {
   if (track.kind === "chip") {
     return "Pattern";
   }
+  if (track.kind === "audio") {
+    return "Import";
+  }
   return "Clip";
 }
 

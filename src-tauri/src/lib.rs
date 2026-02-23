@@ -10,8 +10,9 @@ use tauri_plugin_log::{Target, TargetKind, log::LevelFilter};
 use tracing::{error, info, instrument};
 use uuid::Uuid;
 use voltlane_core::{
-    AddClipRequest, AddTrackRequest, ClipPayload, Engine, ExportKind, MidiClip, MidiNote,
-    ParityReport, PatternClip, Project, TrackStatePatch, init_tracing_with_options,
+    AddClipRequest, AddTrackRequest, AudioAnalysis, AudioAssetEntry, AudioClipPatch, ClipPayload,
+    Engine, ExportKind, MidiClip, MidiNote, ParityReport, PatternClip, Project, TrackStatePatch,
+    init_tracing_with_options,
 };
 
 use crate::config::{AppConfig, AppMode};
@@ -37,6 +38,42 @@ struct AddMidiClipInput {
     instrument: Option<String>,
     source_chip: Option<String>,
     notes: Vec<MidiNote>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ScanAudioAssetsInput {
+    directory: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AnalyzeAudioAssetInput {
+    path: String,
+    cache_dir: Option<String>,
+    bucket_size: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ImportAudioClipInput {
+    track_id: String,
+    name: Option<String>,
+    source_path: String,
+    start_tick: u64,
+    cache_dir: Option<String>,
+    bucket_size: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateAudioClipInput {
+    track_id: String,
+    clip_id: String,
+    gain_db: Option<f32>,
+    pan: Option<f32>,
+    trim_start_seconds: Option<f64>,
+    trim_end_seconds: Option<f64>,
+    fade_in_seconds: Option<f64>,
+    fade_out_seconds: Option<f64>,
+    reverse: Option<bool>,
+    stretch_ratio: Option<f32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -203,6 +240,116 @@ fn add_midi_clip(state: State<'_, AppState>, input: AddMidiClipInput) -> Result<
     let mut engine = state.engine.lock();
     engine
         .add_clip(request)
+        .map_err(|error| error.to_string())?;
+    Ok(engine.project().clone())
+}
+
+#[instrument(skip(state, input))]
+#[tauri::command]
+fn scan_audio_assets(
+    state: State<'_, AppState>,
+    input: Option<ScanAudioAssetsInput>,
+) -> Result<Vec<AudioAssetEntry>, String> {
+    let directory = input.and_then(|value| value.directory).unwrap_or_else(|| {
+        state
+            .config
+            .audio
+            .asset_directories
+            .first()
+            .map(|path| resolve_dev_path(path).display().to_string())
+            .unwrap_or_else(|| "tmp/audio".to_string())
+    });
+
+    let engine = state.engine.lock();
+    engine
+        .scan_audio_assets(Path::new(directory.as_str()))
+        .map_err(|error| error.to_string())
+}
+
+#[instrument(skip(state, input))]
+#[tauri::command]
+fn analyze_audio_asset(
+    state: State<'_, AppState>,
+    input: AnalyzeAudioAssetInput,
+) -> Result<AudioAnalysis, String> {
+    let cache_dir = input
+        .cache_dir
+        .map(PathBuf::from)
+        .unwrap_or_else(|| resolve_dev_path(&state.config.audio.waveform_cache_dir));
+    let bucket_size = input
+        .bucket_size
+        .unwrap_or(state.config.audio.analysis_bucket_size)
+        .max(1);
+
+    let engine = state.engine.lock();
+    engine
+        .analyze_audio_asset(Path::new(&input.path), &cache_dir, bucket_size)
+        .map_err(|error| error.to_string())
+}
+
+#[instrument(skip(state, input))]
+#[tauri::command]
+fn import_audio_clip(
+    state: State<'_, AppState>,
+    input: ImportAudioClipInput,
+) -> Result<Project, String> {
+    let track_id = parse_uuid(&input.track_id)?;
+    let cache_dir = input
+        .cache_dir
+        .map(PathBuf::from)
+        .unwrap_or_else(|| resolve_dev_path(&state.config.audio.waveform_cache_dir));
+    let bucket_size = input
+        .bucket_size
+        .unwrap_or(state.config.audio.analysis_bucket_size)
+        .max(1);
+    let name = input.name.unwrap_or_else(|| {
+        Path::new(&input.source_path)
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .map_or_else(
+                || state.config.audio.default_import_clip_name.clone(),
+                std::string::ToString::to_string,
+            )
+    });
+
+    let mut engine = state.engine.lock();
+    engine
+        .import_audio_clip(
+            track_id,
+            name,
+            Path::new(&input.source_path),
+            input.start_tick,
+            bucket_size,
+            Some(&cache_dir),
+            state.config.audio.default_gain_db,
+            state.config.audio.default_pan,
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(engine.project().clone())
+}
+
+#[instrument(skip(state, input))]
+#[tauri::command]
+fn update_audio_clip(
+    state: State<'_, AppState>,
+    input: UpdateAudioClipInput,
+) -> Result<Project, String> {
+    let track_id = parse_uuid(&input.track_id)?;
+    let clip_id = parse_uuid(&input.clip_id)?;
+    let patch = AudioClipPatch {
+        gain_db: input.gain_db,
+        pan: input.pan,
+        trim_start_seconds: input.trim_start_seconds,
+        trim_end_seconds: input.trim_end_seconds,
+        fade_in_seconds: input.fade_in_seconds,
+        fade_out_seconds: input.fade_out_seconds,
+        reverse: input.reverse,
+        stretch_ratio: input.stretch_ratio,
+    };
+
+    let mut engine = state.engine.lock();
+    engine
+        .patch_audio_clip(track_id, clip_id, patch)
         .map_err(|error| error.to_string())?;
     Ok(engine.project().clone())
 }
@@ -410,9 +557,13 @@ fn resolve_dev_path(path: &Path) -> PathBuf {
         return path.to_path_buf();
     }
 
-    std::env::current_dir()
-        .map(|cwd| cwd.join(path))
-        .unwrap_or_else(|_| path.to_path_buf())
+    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .map_or_else(
+            || PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+            Path::to_path_buf,
+        );
+    workspace_root.join(path)
 }
 
 fn resolve_runtime_log_dir(config: &AppConfig, app: &tauri::App) -> anyhow::Result<PathBuf> {
@@ -507,6 +658,8 @@ pub fn run() {
                 session_id = %telemetry.session_id,
                 log_dir = %log_dir.display(),
                 default_soundfont = %config.midi.default_soundfont_path.display(),
+                audio_asset_dirs = ?config.audio.asset_directories,
+                waveform_cache_dir = %config.audio.waveform_cache_dir.display(),
                 "voltlane tauri setup complete"
             );
 
@@ -522,6 +675,10 @@ pub fn run() {
             patch_track_state,
             reorder_track,
             add_midi_clip,
+            scan_audio_assets,
+            analyze_audio_asset,
+            import_audio_clip,
+            update_audio_clip,
             move_clip,
             update_clip_notes,
             add_clip_note,

@@ -6,27 +6,46 @@ use tracing::{debug, info, instrument, warn};
 use uuid::Uuid;
 
 use crate::{
+    assets::{
+        AudioAnalysis, AudioAssetEntry, analyze_audio_file, analyze_audio_file_with_cache,
+        scan_audio_assets,
+    },
     export,
     model::{
-        Clip, ClipPayload, DEFAULT_SAMPLE_RATE, EffectSpec, MidiNote, Project, Track, TrackKind,
+        AudioClip, Clip, ClipPayload, DEFAULT_SAMPLE_RATE, EffectSpec, MidiNote, Project, Track,
+        TrackKind,
     },
     persistence,
+    time::seconds_to_ticks,
 };
 
 #[derive(Debug, Error)]
 pub enum EngineError {
     #[error("track not found: {0}")]
     TrackNotFound(Uuid),
+    #[error("track {track_id} is not an audio track (found: {kind:?})")]
+    InvalidAudioTrack { track_id: Uuid, kind: TrackKind },
     #[error("clip not found: {0}")]
     ClipNotFound(Uuid),
     #[error("clip does not support midi note editing: {0}")]
     UnsupportedClipPayload(Uuid),
+    #[error("clip is not an audio clip: {0}")]
+    UnsupportedAudioClip(Uuid),
     #[error("invalid quantize grid ticks: {0}")]
     InvalidQuantizeGrid(u64),
     #[error("invalid note index: {0}")]
     InvalidNoteIndex(usize),
     #[error("invalid reorder from {from} to {to}")]
     InvalidReorder { from: usize, to: usize },
+    #[error("invalid audio trim range: start={start_seconds:.3}s end={end_seconds:.3}s")]
+    InvalidAudioTrimRange {
+        start_seconds: f64,
+        end_seconds: f64,
+    },
+    #[error("invalid audio stretch ratio: {0}")]
+    InvalidAudioStretchRatio(f32),
+    #[error("invalid audio analysis bucket size: {0}")]
+    InvalidAudioBucketSize(usize),
     #[error("io error: {0}")]
     Io(String),
 }
@@ -69,6 +88,18 @@ pub struct TrackStatePatch {
     pub mute: Option<bool>,
     pub solo: Option<bool>,
     pub enabled: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AudioClipPatch {
+    pub gain_db: Option<f32>,
+    pub pan: Option<f32>,
+    pub trim_start_seconds: Option<f64>,
+    pub trim_end_seconds: Option<f64>,
+    pub fade_in_seconds: Option<f64>,
+    pub fade_out_seconds: Option<f64>,
+    pub reverse: Option<bool>,
+    pub stretch_ratio: Option<f32>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -233,6 +264,152 @@ impl Engine {
         self.project.touch();
         info!(clip_id = %clip.id, "clip added");
         Ok(clip)
+    }
+
+    #[instrument(skip(self), fields(directory = %directory.display()))]
+    pub fn scan_audio_assets(&self, directory: &Path) -> Result<Vec<AudioAssetEntry>, EngineError> {
+        scan_audio_assets(directory).map_err(Into::into)
+    }
+
+    #[instrument(skip(self), fields(path = %path.display(), bucket_size, cache_dir = %cache_dir.display()))]
+    pub fn analyze_audio_asset(
+        &self,
+        path: &Path,
+        cache_dir: &Path,
+        bucket_size: usize,
+    ) -> Result<AudioAnalysis, EngineError> {
+        if bucket_size == 0 {
+            return Err(EngineError::InvalidAudioBucketSize(bucket_size));
+        }
+        analyze_audio_file_with_cache(path, cache_dir, bucket_size).map_err(Into::into)
+    }
+
+    #[instrument(skip(self), fields(project_id = %self.project.id, track_id = %track_id, source_path = %source_path.display(), start_tick, bucket_size, cache_dir = ?cache_dir.map(|value| value.display().to_string())))]
+    pub fn import_audio_clip(
+        &mut self,
+        track_id: Uuid,
+        name: String,
+        source_path: &Path,
+        start_tick: u64,
+        bucket_size: usize,
+        cache_dir: Option<&Path>,
+        default_gain_db: f32,
+        default_pan: f32,
+    ) -> Result<Clip, EngineError> {
+        if bucket_size == 0 {
+            return Err(EngineError::InvalidAudioBucketSize(bucket_size));
+        }
+
+        let analysis = if let Some(cache_dir) = cache_dir {
+            analyze_audio_file_with_cache(source_path, cache_dir, bucket_size)?
+        } else {
+            analyze_audio_file(source_path, bucket_size)?
+        };
+
+        let mut audio = AudioClip {
+            source_path: analysis.source_path.clone(),
+            gain_db: default_gain_db.clamp(-96.0, 12.0),
+            pan: default_pan.clamp(-1.0, 1.0),
+            source_sample_rate: analysis.sample_rate,
+            source_channels: analysis.channels.max(1),
+            source_duration_seconds: analysis.duration_seconds.max(0.0),
+            trim_start_seconds: 0.0,
+            trim_end_seconds: analysis.duration_seconds.max(0.0),
+            fade_in_seconds: 0.0,
+            fade_out_seconds: 0.0,
+            reverse: false,
+            stretch_ratio: 1.0,
+            waveform_bucket_size: analysis.peaks.bucket_size,
+            waveform_peaks: analysis.peaks.peaks.clone(),
+            waveform_cache_path: analysis.cache_path.clone(),
+        };
+        sanitize_audio_clip(&mut audio)?;
+        let length_ticks = seconds_to_ticks(
+            audio.effective_duration_seconds(),
+            self.project.bpm,
+            self.project.ppq,
+        )
+        .max(1);
+
+        let clip = Clip {
+            id: Uuid::new_v4(),
+            name,
+            start_tick,
+            length_ticks,
+            disabled: false,
+            payload: ClipPayload::Audio(audio),
+        };
+
+        let track = self.find_track_mut(track_id)?;
+        if !matches!(track.kind, TrackKind::Audio) {
+            return Err(EngineError::InvalidAudioTrack {
+                track_id,
+                kind: track.kind.clone(),
+            });
+        }
+
+        track.clips.push(clip.clone());
+        self.project.touch();
+        info!(clip_id = %clip.id, "audio clip imported");
+        Ok(clip)
+    }
+
+    #[instrument(skip(self), fields(project_id = %self.project.id, track_id = %track_id, clip_id = %clip_id))]
+    pub fn patch_audio_clip(
+        &mut self,
+        track_id: Uuid,
+        clip_id: Uuid,
+        patch: AudioClipPatch,
+    ) -> Result<Clip, EngineError> {
+        if let Some(stretch_ratio) = patch.stretch_ratio
+            && stretch_ratio <= 0.0
+        {
+            return Err(EngineError::InvalidAudioStretchRatio(stretch_ratio));
+        }
+
+        let bpm = self.project.bpm;
+        let ppq = self.project.ppq;
+        let updated_clip = {
+            let clip = self.find_clip_mut(track_id, clip_id)?;
+            let audio = match &mut clip.payload {
+                ClipPayload::Audio(audio) => audio,
+                _ => return Err(EngineError::UnsupportedAudioClip(clip_id)),
+            };
+
+            if let Some(gain_db) = patch.gain_db {
+                audio.gain_db = gain_db.clamp(-96.0, 12.0);
+            }
+            if let Some(pan) = patch.pan {
+                audio.pan = pan.clamp(-1.0, 1.0);
+            }
+            if let Some(trim_start_seconds) = patch.trim_start_seconds {
+                audio.trim_start_seconds = trim_start_seconds.max(0.0);
+            }
+            if let Some(trim_end_seconds) = patch.trim_end_seconds {
+                audio.trim_end_seconds = trim_end_seconds.max(0.0);
+            }
+            if let Some(fade_in_seconds) = patch.fade_in_seconds {
+                audio.fade_in_seconds = fade_in_seconds.max(0.0);
+            }
+            if let Some(fade_out_seconds) = patch.fade_out_seconds {
+                audio.fade_out_seconds = fade_out_seconds.max(0.0);
+            }
+            if let Some(reverse) = patch.reverse {
+                audio.reverse = reverse;
+            }
+            if let Some(stretch_ratio) = patch.stretch_ratio {
+                audio.stretch_ratio = stretch_ratio.max(0.01);
+            }
+
+            sanitize_audio_clip(audio)?;
+            clip.length_ticks =
+                seconds_to_ticks(audio.effective_duration_seconds(), bpm, ppq).max(1);
+            clip.clone()
+        };
+
+        self.project.touch();
+        info!("audio clip patched");
+        Ok(updated_clip)
     }
 
     #[instrument(skip(self), fields(project_id = %self.project.id, clip_id = %clip_id, track_id = %track_id))]
@@ -452,13 +629,16 @@ impl Engine {
         Ok(())
     }
 
-    fn find_clip_mut(&mut self, track_id: Uuid, clip_id: Uuid) -> Result<&mut Clip, EngineError> {
-        let track = self
-            .project
+    fn find_track_mut(&mut self, track_id: Uuid) -> Result<&mut Track, EngineError> {
+        self.project
             .tracks
             .iter_mut()
             .find(|track| track.id == track_id)
-            .ok_or(EngineError::TrackNotFound(track_id))?;
+            .ok_or(EngineError::TrackNotFound(track_id))
+    }
+
+    fn find_clip_mut(&mut self, track_id: Uuid, clip_id: Uuid) -> Result<&mut Clip, EngineError> {
+        let track = self.find_track_mut(track_id)?;
 
         track
             .clips
@@ -481,6 +661,49 @@ fn sanitize_note(note: &mut MidiNote) {
     note.velocity = note.velocity.min(127);
     note.channel = note.channel.min(15);
     note.length_ticks = note.length_ticks.max(1);
+}
+
+fn sanitize_audio_clip(audio: &mut AudioClip) -> Result<(), EngineError> {
+    audio.gain_db = audio.gain_db.clamp(-96.0, 12.0);
+    audio.pan = audio.pan.clamp(-1.0, 1.0);
+    audio.source_duration_seconds = audio.source_duration_seconds.max(0.0);
+    audio.trim_start_seconds = audio.trim_start_seconds.max(0.0);
+    audio.trim_end_seconds = audio.trim_end_seconds.max(0.0);
+    audio.fade_in_seconds = audio.fade_in_seconds.max(0.0);
+    audio.fade_out_seconds = audio.fade_out_seconds.max(0.0);
+
+    if audio.stretch_ratio <= 0.0 {
+        return Err(EngineError::InvalidAudioStretchRatio(audio.stretch_ratio));
+    }
+    audio.stretch_ratio = audio.stretch_ratio.max(0.01);
+
+    if audio.trim_end_seconds < audio.trim_start_seconds {
+        return Err(EngineError::InvalidAudioTrimRange {
+            start_seconds: audio.trim_start_seconds,
+            end_seconds: audio.trim_end_seconds,
+        });
+    }
+
+    if audio.trim_start_seconds > audio.source_duration_seconds {
+        audio.trim_start_seconds = audio.source_duration_seconds;
+    }
+    if audio.trim_end_seconds > audio.source_duration_seconds {
+        audio.trim_end_seconds = audio.source_duration_seconds;
+    }
+
+    if audio.fade_in_seconds + audio.fade_out_seconds > audio.effective_duration_seconds() {
+        let available = audio.effective_duration_seconds();
+        if available > 0.0 {
+            let scale = available / (audio.fade_in_seconds + audio.fade_out_seconds);
+            audio.fade_in_seconds *= scale;
+            audio.fade_out_seconds *= scale;
+        } else {
+            audio.fade_in_seconds = 0.0;
+            audio.fade_out_seconds = 0.0;
+        }
+    }
+
+    Ok(())
 }
 
 fn round_to_grid(value: u64, grid: u64) -> u64 {

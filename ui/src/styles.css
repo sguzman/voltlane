@@ -298,6 +298,12 @@ input {
   align-self: start;
 }
 
+.sidebar-stack {
+  display: grid;
+  gap: 1rem;
+  align-self: start;
+}
+
 .clip-editor__subtitle {
   margin-top: -0.4rem;
   margin-bottom: 0.7rem;
@@ -335,6 +341,86 @@ input {
   border: 1px solid var(--line);
   border-radius: 0.4rem;
   padding: 0.2rem 0.3rem;
+}
+
+.field--checkbox {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.7rem;
+}
+
+.field--checkbox input {
+  width: auto;
+}
+
+.panel--audio-browser {
+  align-self: start;
+}
+
+.audio-browser__list {
+  margin-top: 0.65rem;
+  margin-bottom: 0.65rem;
+  max-height: 14rem;
+  overflow: auto;
+  display: grid;
+  gap: 0.35rem;
+}
+
+.audio-browser__list p {
+  margin: 0;
+  color: var(--muted);
+}
+
+.audio-browser__item {
+  width: 100%;
+  text-align: left;
+  border: 1px solid var(--line);
+  background: #fff;
+  border-radius: 0.6rem;
+  padding: 0.45rem 0.55rem;
+  cursor: pointer;
+}
+
+.audio-browser__item--selected {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+  background: color-mix(in srgb, var(--accent) 12%, white);
+}
+
+.audio-browser__item-path {
+  display: block;
+  font-size: 0.78rem;
+  overflow-wrap: anywhere;
+}
+
+.audio-browser__item-meta {
+  display: block;
+  color: var(--muted);
+  font-size: 0.73rem;
+}
+
+.audio-browser__preview p {
+  margin: 0 0 0.45rem;
+}
+
+.audio-browser__waveform {
+  margin-top: 0.6rem;
+  min-height: 3.5rem;
+  display: grid;
+  grid-template-columns: repeat(24, minmax(0, 1fr));
+  align-items: end;
+  gap: 2px;
+  padding: 0.25rem;
+  border: 1px solid var(--line);
+  border-radius: 0.5rem;
+  background: rgba(16, 37, 42, 0.04);
+}
+
+.audio-browser__waveform span {
+  display: block;
+  width: 100%;
+  border-radius: 0.2rem;
+  background: color-mix(in srgb, var(--accent) 50%, #ffffff);
 }
 
 .panel--parity {
@@ -448,7 +534,7 @@ input {
   }
 
   .panel--clip-editor,
-  .panel--parity {
+  .sidebar-stack {
     grid-column: 1 / -1;
   }
 }
@@ -464,7 +550,7 @@ input {
 
   .panel--controls,
   .panel--clip-editor,
-  .panel--parity {
+  .sidebar-stack {
     order: 2;
   }
 

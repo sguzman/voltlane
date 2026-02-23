@@ -1,8 +1,4 @@
-use voltlane_core::{
-    Engine,
-    fixtures::demo_project,
-    model::MidiNote,
-};
+use voltlane_core::{Engine, fixtures::demo_project, model::MidiNote};
 
 #[test]
 fn transpose_and_quantize_notes_update_clip_data() {

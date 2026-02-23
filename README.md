@@ -6,7 +6,7 @@ Voltlane is a Rust-first FL-style/chiptune composition prototype built with:
 - `src-tauri` (Rust/Tauri): desktop shell and typed command bridge to the core.
 - `ui` (React + TypeScript + CSS): lightweight visual playlist/mixer control surface.
 
-The current implementation targets Milestone A/B from your planning document: project lifecycle, transport controls, colored tracks, clip creation, effect attachment, exports, parity harness, logging, and docs.
+The current implementation now spans Milestone A/B plus core audio-clip workflow slices: project lifecycle, transport controls, colored tracks, clip creation/editing, audio import/indexing, exports, parity harness, logging, and docs.
 
 ## Features Implemented
 
@@ -15,6 +15,8 @@ The current implementation targets Milestone A/B from your planning document: pr
   - project create/load/save/autosave
   - track add/reorder/hide/mute/enable
   - clip add/move
+  - audio asset scan/decode/analyze/import
+  - audio clip trim/fade/reverse/stretch/gain/pan editing
   - effect attachment
   - playback + loop control
 - Export pipeline:
@@ -25,6 +27,7 @@ The current implementation targets Milestone A/B from your planning document: pr
 - Tauri commands for all major operations (`project/track/clip/export/parity`).
 - React UI for playlist lanes, track controls, transport, and parity panel.
 - Clip editor panel for MIDI/pattern note editing (add/remove/update notes, quantize, transpose).
+- Audio browser panel for asset indexing, waveform preview metadata, and direct import into audio tracks.
 - Deterministic parity harness:
   - golden baseline test
   - CLI parity report generation
@@ -48,7 +51,7 @@ The app reads runtime settings from:
 
 - `voltlane.config.toml`
 
-This file now contains the app parameters (mode, defaults, diagnostics, paths, Wayland behavior, export binary path).
+This file contains app parameters (mode, defaults, diagnostics, audio scan/cache behavior, paths, Wayland behavior, export binary path).
 
 Current mode is set to:
 
@@ -62,6 +65,12 @@ MIDI SoundFont defaults are configured here too:
 
 - `midi.default_soundfont_path = "src-tauri/res/soundfonts/piano.sf2"`
 - `midi.default_soundfont_license_path = "src-tauri/res/soundfonts/piano.sf2.LICENSE"`
+
+Audio workflow defaults are configured here:
+
+- `audio.asset_directories = ["tmp/audio", "tmp"]`
+- `audio.waveform_cache_dir = "tmp/waveform-cache"`
+- `audio.analysis_bucket_size = 1024`
 
 ### Install dependencies
 
@@ -87,6 +96,8 @@ pnpm --dir ui run build
 
 ```bash
 pnpm run tauri:dev
+# or
+cargo tauri dev
 ```
 
 ### Wayland note (Linux)

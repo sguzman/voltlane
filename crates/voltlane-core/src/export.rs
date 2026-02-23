@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     fs,
     path::{Path, PathBuf},
     process::Command,
@@ -12,7 +13,8 @@ use midly::{
 use tracing::{debug, info, instrument, warn};
 
 use crate::{
-    model::{ClipPayload, MidiNote, Project, TrackKind},
+    assets::decode_audio_file_mono,
+    model::{AudioClip, ClipPayload, MidiNote, Project, TrackKind},
     time::ticks_to_samples,
 };
 
@@ -49,8 +51,10 @@ pub fn render_project_samples(project: &Project, tail_seconds: f64) -> Vec<f32> 
         .max(u64::from(sample_rate));
     let frame_count = usize::try_from(total_frames).unwrap_or(sample_rate as usize);
 
-    let mut notes = collect_rendered_notes(project);
     let mut buffer = vec![0.0_f32; frame_count];
+    let rendered_audio_clips = mix_audio_clips(project, &mut buffer);
+
+    let mut notes = collect_rendered_notes(project);
     for note in &mut notes {
         let mut phase = 0_u32;
         let end = note.end_sample.min(frame_count);
@@ -71,6 +75,7 @@ pub fn render_project_samples(project: &Project, tail_seconds: f64) -> Vec<f32> 
     debug!(
         frames = buffer.len(),
         rendered_notes = notes.len(),
+        rendered_audio_clips,
         "audio render completed"
     );
     buffer
@@ -314,6 +319,170 @@ fn note_to_midi_events(note: &MidiNote, clip_start_tick: u64) -> [AbsoluteMidiEv
             },
         },
     ]
+}
+
+fn mix_audio_clips(project: &Project, buffer: &mut [f32]) -> usize {
+    let mut decoded_cache = HashMap::new();
+    let mut rendered_audio_clips = 0_usize;
+
+    for track in &project.tracks {
+        if !track.enabled || track.mute || track.hidden {
+            continue;
+        }
+
+        for clip in &track.clips {
+            if clip.disabled {
+                continue;
+            }
+            let ClipPayload::Audio(audio_clip) = &clip.payload else {
+                continue;
+            };
+
+            if !decoded_cache.contains_key(&audio_clip.source_path) {
+                match decode_audio_file_mono(Path::new(&audio_clip.source_path)) {
+                    Ok(decoded) => {
+                        decoded_cache.insert(audio_clip.source_path.clone(), decoded);
+                    }
+                    Err(error) => {
+                        warn!(
+                            path = %audio_clip.source_path,
+                            ?error,
+                            "failed to decode audio clip source while rendering, skipping clip"
+                        );
+                        continue;
+                    }
+                }
+            }
+
+            let Some(decoded) = decoded_cache.get(&audio_clip.source_path) else {
+                continue;
+            };
+            if decoded.samples.is_empty() {
+                continue;
+            }
+
+            mix_audio_clip_samples(
+                project,
+                clip.start_tick,
+                clip.length_ticks,
+                audio_clip,
+                decoded.sample_rate,
+                &decoded.samples,
+                buffer,
+            );
+            rendered_audio_clips += 1;
+        }
+    }
+
+    rendered_audio_clips
+}
+
+fn mix_audio_clip_samples(
+    project: &Project,
+    clip_start_tick: u64,
+    clip_length_ticks: u64,
+    audio: &AudioClip,
+    source_sample_rate: u32,
+    source_samples: &[f32],
+    buffer: &mut [f32],
+) {
+    if source_sample_rate == 0 || source_samples.is_empty() || buffer.is_empty() {
+        return;
+    }
+
+    let start_frame = ticks_to_samples(
+        clip_start_tick,
+        project.bpm,
+        project.ppq,
+        project.sample_rate,
+    ) as usize;
+    if start_frame >= buffer.len() {
+        return;
+    }
+
+    let requested_frames = ticks_to_samples(
+        clip_length_ticks.max(1),
+        project.bpm,
+        project.ppq,
+        project.sample_rate,
+    ) as usize;
+    let output_frames = requested_frames.min(buffer.len().saturating_sub(start_frame));
+    if output_frames == 0 {
+        return;
+    }
+
+    let (trim_start_seconds, trim_end_seconds) = audio.normalized_trim_range();
+    let source_start = (trim_start_seconds * f64::from(source_sample_rate)).round() as usize;
+    let source_end = (trim_end_seconds * f64::from(source_sample_rate)).round() as usize;
+    let source_start = source_start.min(source_samples.len().saturating_sub(1));
+    let source_end = source_end.min(source_samples.len());
+    if source_end <= source_start {
+        return;
+    }
+    let source_frames = source_end.saturating_sub(source_start).max(1);
+
+    let fade_in_frames =
+        (audio.fade_in_seconds.max(0.0) * f64::from(project.sample_rate)).round() as usize;
+    let fade_out_frames =
+        (audio.fade_out_seconds.max(0.0) * f64::from(project.sample_rate)).round() as usize;
+
+    let pan_gain = 1.0 - (audio.pan.abs() * 0.2);
+    let clip_gain = db_to_gain(audio.gain_db) * pan_gain;
+
+    for frame_index in 0..output_frames {
+        let ratio = if output_frames > 1 {
+            frame_index as f64 / (output_frames - 1) as f64
+        } else {
+            0.0
+        };
+        let source_offset = ratio * source_frames.saturating_sub(1) as f64;
+        let source_index = if audio.reverse {
+            source_end.saturating_sub(1) as f64 - source_offset
+        } else {
+            source_start as f64 + source_offset
+        };
+
+        let source_sample = sample_linear(source_samples, source_index);
+        let envelope = fade_envelope(frame_index, output_frames, fade_in_frames, fade_out_frames);
+        buffer[start_frame + frame_index] += source_sample * clip_gain * envelope;
+    }
+}
+
+fn sample_linear(samples: &[f32], index: f64) -> f32 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+
+    let max_index = samples.len().saturating_sub(1) as f64;
+    let left = index.floor().clamp(0.0, max_index) as usize;
+    let right = (left + 1).min(samples.len().saturating_sub(1));
+    let frac = (index - left as f64).clamp(0.0, 1.0) as f32;
+    let left_sample = samples[left];
+    let right_sample = samples[right];
+    left_sample + ((right_sample - left_sample) * frac)
+}
+
+fn fade_envelope(
+    frame_index: usize,
+    total_frames: usize,
+    fade_in_frames: usize,
+    fade_out_frames: usize,
+) -> f32 {
+    let mut gain = 1.0_f32;
+
+    if fade_in_frames > 0 {
+        gain *= (frame_index as f32 / fade_in_frames as f32).clamp(0.0, 1.0);
+    }
+    if fade_out_frames > 0 {
+        let frames_to_end = total_frames.saturating_sub(frame_index + 1);
+        gain *= (frames_to_end as f32 / fade_out_frames as f32).clamp(0.0, 1.0);
+    }
+
+    gain
+}
+
+fn db_to_gain(gain_db: f32) -> f32 {
+    10.0_f32.powf(gain_db / 20.0)
 }
 
 fn collect_rendered_notes(project: &Project) -> Vec<RenderedNote> {

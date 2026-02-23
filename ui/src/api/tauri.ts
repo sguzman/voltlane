@@ -3,19 +3,25 @@ import { invoke } from "@tauri-apps/api/core";
 import { logger } from "../lib/logger";
 import type {
   AddClipNoteInput,
+  AnalyzeAudioAssetInput,
   AddMidiClipInput,
   AddTrackRequest,
+  AudioAnalysis,
+  AudioAssetEntry,
   Clip,
   ExportProjectInput,
+  ImportAudioClipInput,
   MoveClipInput,
   QuantizeClipNotesInput,
   ParityReport,
   PatchTrackInput,
   Project,
   RemoveClipNoteInput,
+  ScanAudioAssetsInput,
   Track,
   TrackKind,
   TransposeClipNotesInput,
+  UpdateAudioClipInput,
   UpdateClipNotesInput
 } from "../types";
 
@@ -177,6 +183,33 @@ function clampNote(value: UpdateClipNotesInput["notes"][number]): UpdateClipNote
   };
 }
 
+function mockWaveformPeaks(bucketSize: number, count = 128): number[] {
+  const density = Math.max(1, bucketSize);
+  return Array.from({ length: count }, (_, index) => {
+    const phase = (index / count) * Math.PI * 4 + density / 1_000;
+    return Number((0.15 + Math.abs(Math.sin(phase)) * 0.75).toFixed(4));
+  });
+}
+
+function mockAudioAnalysisFromPath(path: string, bucketSize: number): AudioAnalysis {
+  const sampleRate = 48_000;
+  const channels = 2;
+  const durationSeconds = 6.0;
+  const totalFrames = Math.round(sampleRate * durationSeconds);
+  return {
+    source_path: path,
+    sample_rate: sampleRate,
+    channels,
+    total_frames: totalFrames,
+    duration_seconds: durationSeconds,
+    peaks: {
+      bucket_size: bucketSize,
+      peaks: mockWaveformPeaks(bucketSize)
+    },
+    cache_path: `localStorage://waveform-cache/${encodeURIComponent(path)}.json`
+  };
+}
+
 async function invokeMock<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   logger.debug(`mock invoke ${command}`, args);
 
@@ -243,6 +276,114 @@ async function invokeMock<T>(command: string, args?: Record<string, unknown>): P
       };
 
       track.clips.push(clip);
+      touchProject();
+      return mockProject as T;
+    }
+
+    case "scan_audio_assets": {
+      const input = args?.input as ScanAudioAssetsInput | undefined;
+      const directory = input?.directory ?? "tmp/audio";
+      const assets: AudioAssetEntry[] = [
+        {
+          path: `${directory}/drums/kick.wav`,
+          extension: "wav",
+          size_bytes: 62_400
+        },
+        {
+          path: `${directory}/loops/breakbeat.wav`,
+          extension: "wav",
+          size_bytes: 480_128
+        },
+        {
+          path: `${directory}/fx/laser.ogg`,
+          extension: "ogg",
+          size_bytes: 43_912
+        }
+      ];
+      return assets as T;
+    }
+
+    case "analyze_audio_asset": {
+      const input = args?.input as AnalyzeAudioAssetInput;
+      const bucketSize = Math.max(1, Math.round(input.bucket_size ?? 1024));
+      return mockAudioAnalysisFromPath(input.path, bucketSize) as T;
+    }
+
+    case "import_audio_clip": {
+      const input = args?.input as ImportAudioClipInput;
+      const track = mockProject.tracks.find((candidate) => candidate.id === input.track_id);
+      if (!track) {
+        throw new Error(`track not found: ${input.track_id}`);
+      }
+      if (track.kind !== "audio") {
+        throw new Error(`track is not audio: ${input.track_id}`);
+      }
+
+      const analysis = mockAudioAnalysisFromPath(input.source_path, input.bucket_size ?? 1024);
+      const clipLengthTicks = Math.max(
+        1,
+        Math.round((analysis.duration_seconds * mockProject.bpm * mockProject.ppq) / 60)
+      );
+
+      track.clips.push({
+        id: crypto.randomUUID(),
+        name: input.name ?? input.source_path.split("/").pop() ?? "Audio Clip",
+        start_tick: input.start_tick,
+        length_ticks: clipLengthTicks,
+        disabled: false,
+        payload: {
+          audio: {
+            source_path: input.source_path,
+            gain_db: 0,
+            pan: 0,
+            source_sample_rate: analysis.sample_rate,
+            source_channels: analysis.channels,
+            source_duration_seconds: analysis.duration_seconds,
+            trim_start_seconds: 0,
+            trim_end_seconds: analysis.duration_seconds,
+            fade_in_seconds: 0,
+            fade_out_seconds: 0,
+            reverse: false,
+            stretch_ratio: 1,
+            waveform_bucket_size: analysis.peaks.bucket_size,
+            waveform_peaks: analysis.peaks.peaks,
+            waveform_cache_path: analysis.cache_path
+          }
+        }
+      });
+      touchProject();
+      return mockProject as T;
+    }
+
+    case "update_audio_clip": {
+      const input = args?.input as UpdateAudioClipInput;
+      const { clip } = getClipRefs(mockProject, input.track_id, input.clip_id);
+      if (!("audio" in clip.payload)) {
+        throw new Error(`clip is not audio: ${input.clip_id}`);
+      }
+
+      const audio = clip.payload.audio;
+      if (typeof input.gain_db === "number") audio.gain_db = input.gain_db;
+      if (typeof input.pan === "number") audio.pan = input.pan;
+      if (typeof input.trim_start_seconds === "number") {
+        audio.trim_start_seconds = Math.max(0, input.trim_start_seconds);
+      }
+      if (typeof input.trim_end_seconds === "number") {
+        audio.trim_end_seconds = Math.max(audio.trim_start_seconds, input.trim_end_seconds);
+      }
+      if (typeof input.fade_in_seconds === "number") audio.fade_in_seconds = Math.max(0, input.fade_in_seconds);
+      if (typeof input.fade_out_seconds === "number") audio.fade_out_seconds = Math.max(0, input.fade_out_seconds);
+      if (typeof input.reverse === "boolean") audio.reverse = input.reverse;
+      if (typeof input.stretch_ratio === "number") {
+        audio.stretch_ratio = Math.max(0.01, input.stretch_ratio);
+      }
+
+      const trimmedDuration = Math.max(0, audio.trim_end_seconds - audio.trim_start_seconds);
+      const effectiveDuration = trimmedDuration * Math.max(0.01, audio.stretch_ratio);
+      clip.length_ticks = Math.max(
+        1,
+        Math.round((effectiveDuration * mockProject.bpm * mockProject.ppq) / 60)
+      );
       touchProject();
       return mockProject as T;
     }
@@ -434,6 +575,22 @@ export async function reorderTrack(input: ReorderTrackInput): Promise<Project> {
 
 export async function addMidiClip(input: AddMidiClipInput): Promise<Project> {
   return invokeCommand<Project>("add_midi_clip", { input });
+}
+
+export async function scanAudioAssets(input?: ScanAudioAssetsInput): Promise<AudioAssetEntry[]> {
+  return invokeCommand<AudioAssetEntry[]>("scan_audio_assets", { input });
+}
+
+export async function analyzeAudioAsset(input: AnalyzeAudioAssetInput): Promise<AudioAnalysis> {
+  return invokeCommand<AudioAnalysis>("analyze_audio_asset", { input });
+}
+
+export async function importAudioClip(input: ImportAudioClipInput): Promise<Project> {
+  return invokeCommand<Project>("import_audio_clip", { input });
+}
+
+export async function updateAudioClip(input: UpdateAudioClipInput): Promise<Project> {
+  return invokeCommand<Project>("update_audio_clip", { input });
 }
 
 export async function moveClip(input: MoveClipInput): Promise<Project> {
